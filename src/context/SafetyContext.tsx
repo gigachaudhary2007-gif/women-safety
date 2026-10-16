@@ -104,6 +104,8 @@ interface SafetyContextType {
     evidenceId: string,
     enteredPin: string
   ) => Promise<{ success: boolean; message: string }>;
+  retryEvidenceUpload: (evidenceId: string) => Promise<{ success: boolean; message: string }>;
+  getOrRestoreBlobUrl: (evidenceId: string) => Promise<string | null>;
 
   // Audit and Confirmations
   confirmationsList: SafetyConfirmationRecord[];
@@ -375,17 +377,23 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     const payload = await cameraRecorderRef.current.stopRecording();
     setIsCameraRecording(false);
 
-    if (!payload) {
+    if (!payload || payload.fileSizeBytes === 0) {
       setEvidenceState('FAILED');
+      showToast('Video recording could not be saved (0 bytes captured)');
       return null;
     }
 
-    // Upload to Supabase Storage private bucket
+    const evidenceId = `ev_vid_${Date.now()}`;
+
+    // 1. Persistent app-private storage: Store actual binary blob in IndexedDB
+    await saveEvidenceBlobToDb(evidenceId, payload.videoBlob, payload.mimeType);
+
+    // 2. Upload to Supabase Storage private bucket if configured
     const fileName = `evidence_video_${Date.now()}_${payload.sha256Hash.slice(0, 8)}.webm`;
     const uploadRes = await uploadEvidenceToSupabaseStorage(fileName, payload.videoBlob, user.id);
 
     const newEvidence: EvidenceRecord = {
-      id: `ev_vid_${Date.now()}`,
+      id: evidenceId,
       type: 'video',
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', month: 'short', day: 'numeric' }),
       duration: `${Math.floor(payload.durationSeconds / 60)}:${(payload.durationSeconds % 60).toString().padStart(2, '0')}`,
@@ -413,12 +421,87 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     });
 
     setEvidenceState(uploadRes.success ? 'UPLOADED' : 'SAVED_LOCALLY');
+    logAudit('VIDEO_EVIDENCE_RECORDED', `Duration: ${payload.durationSeconds}s, Size: ${payload.fileSizeBytes}B, SHA-256: ${payload.sha256Hash.slice(0, 16)}...`);
     showToast('Video evidence cryptographically sealed and saved.');
     return newEvidence;
   };
 
-  // Trigger Emergency SOS
+  // Restore live Blob URLs from IndexedDB on demand or startup
+  const getOrRestoreBlobUrl = async (evidenceId: string): Promise<string | null> => {
+    const rec = evidenceList.find((r) => r.id === evidenceId);
+    if (rec?.videoBlobUrl) return rec.videoBlobUrl;
+    if (rec?.audioBlobUrl) return rec.audioBlobUrl;
+
+    const blob = await getEvidenceBlobFromDb(evidenceId);
+    if (!blob) return null;
+
+    const restoredUrl = URL.createObjectURL(blob);
+    setEvidenceList((prev) =>
+      prev.map((item) =>
+        item.id === evidenceId
+          ? {
+              ...item,
+              videoBlobUrl: item.type === 'video' ? restoredUrl : item.videoBlobUrl,
+              audioBlobUrl: item.type === 'audio' ? restoredUrl : item.audioBlobUrl,
+            }
+          : item
+      )
+    );
+    return restoredUrl;
+  };
+
+  // Retry uploading local evidence to Supabase Storage
+  const retryEvidenceUpload = async (evidenceId: string): Promise<{ success: boolean; message: string }> => {
+    const rec = evidenceList.find((r) => r.id === evidenceId);
+    if (!rec) return { success: false, message: 'Evidence record not found' };
+
+    let blob = await getEvidenceBlobFromDb(evidenceId);
+    if (!blob && rec.videoBlobUrl) {
+      try {
+        const res = await fetch(rec.videoBlobUrl);
+        blob = await res.blob();
+      } catch {}
+    }
+
+    if (!blob) {
+      return { success: false, message: 'Local binary file not found.' };
+    }
+
+    const ext = rec.type === 'video' ? 'webm' : 'webm';
+    const fileName = `evidence_${rec.type}_${Date.now()}_${rec.sha256Hash?.slice(0, 8) || 'retry'}.${ext}`;
+    const uploadRes = await uploadEvidenceToSupabaseStorage(fileName, blob, user.id);
+
+    if (uploadRes.success) {
+      setEvidenceList((prev) => {
+        const updated = prev.map((item) =>
+          item.id === evidenceId
+            ? {
+                ...item,
+                syncedToCloud: true,
+                uploadStatus: 'UPLOADED' as const,
+                storagePath: uploadRes.storagePath,
+              }
+            : item
+        );
+        try {
+          localStorage.setItem(STORAGE_KEY_EVIDENCE, JSON.stringify(updated));
+        } catch {}
+        return updated;
+      });
+      showToast('Evidence uploaded to Supabase Storage.');
+      return { success: true, message: 'Uploaded successfully.' };
+    }
+
+    return { success: false, message: 'Cloud upload failed: storage rejected or network unavailable.' };
+  };
+
+  // Trigger Emergency SOS with duplicate prevention
   const triggerSos = useCallback((reason = 'Direct SOS Triggered') => {
+    if (isSosActive) {
+      console.warn('SOS already active; duplicate request ignored:', reason);
+      return;
+    }
+
     setIsSosActive(true);
     setSosReason(reason);
     setIsDeviationAlertActive(false);
@@ -497,9 +580,11 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     } else {
       const detector = new VoiceSosDetector({
         triggerPhrase: settings.voicePhrase || 'SafeJourney, Help',
-        onDetected: (transcript) => {
+        confidenceThreshold: 0.25,
+        onDetected: (transcript, confidence) => {
           soundManager.playBeep(980, 0.4);
-          triggerSos(`Voice Activated Wake-Word: "${transcript}"`);
+          logAudit('VOICE_SOS_TRIGGERED', `Recognized phrase: "${transcript}" (confidence: ${confidence.toFixed(2)})`);
+          triggerSos(`Voice Activated Emergency Phrase: "${transcript}"`);
         },
         onStatusChange: (status, msg) => {
           if (msg) setVoiceStatusMessage(msg);
@@ -793,6 +878,12 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       setIsSirenPlaying(false);
       setJourneyState('INACTIVE');
       setEvidenceState('SAVED_LOCALLY');
+
+      // Auto-save any active video recording initiated during SOS
+      if (cameraRecorderRef.current.isRecording()) {
+        stopCameraRecording().catch((err) => console.warn('Could not auto-save video on SOS cancel:', err));
+      }
+
       logAudit('EMERGENCY_SOS_CANCELLED', 'User entered valid security PIN');
       showToast('Emergency SOS dismissed.');
       return { success: true, message: 'SOS dismissed', isDuress: false };
@@ -838,9 +929,10 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       };
     }
 
-    // 3. Find record and purge from Supabase storage and local state
+    // 3. Find record and purge from Supabase storage, local state, and IndexedDB
     const record = evidenceList.find((r) => r.id === evidenceId);
     await deleteEvidenceFromSupabase(evidenceId, record?.storagePath);
+    await deleteEvidenceBlobFromDb(evidenceId);
 
     setEvidenceList((prev) => {
       const updated = prev.filter((item) => item.id !== evidenceId);
@@ -921,6 +1013,8 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         evidenceState,
         addEvidenceRecord,
         deleteEvidenceRecordWithAuth,
+        retryEvidenceUpload,
+        getOrRestoreBlobUrl,
         confirmationsList,
         auditList,
         emergencyEvents,

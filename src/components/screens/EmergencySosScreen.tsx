@@ -14,6 +14,9 @@ import {
   CheckCircle2,
   Flame,
   Radio,
+  Video,
+  VideoOff,
+  Camera,
 } from 'lucide-react';
 import { useSafety } from '../../context/SafetyContext';
 import { soundManager } from '../../utils/audio';
@@ -32,19 +35,26 @@ export const EmergencySosScreen: React.FC = () => {
     toggleSiren,
     addEvidenceRecord,
     showToast,
+    isCameraRecording,
+    startCameraRecording,
+    stopCameraRecording,
   } = useSafety();
 
   const [showPinModal, setShowPinModal] = useState<boolean>(false);
   const [isRecordingAudio, setIsRecordingAudio] = useState<boolean>(true);
   const [recordingSeconds, setRecordingSeconds] = useState<number>(0);
+  const [videoSeconds, setVideoSeconds] = useState<number>(0);
   const [isStrobeActive, setIsStrobeActive] = useState<boolean>(false);
   const [sentAlerts, setSentAlerts] = useState<{ [contactId: string]: boolean }>({});
+  const [cameraError, setCameraError] = useState<string | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recordIntervalRef = useRef<number | null>(null);
+  const videoIntervalRef = useRef<number | null>(null);
+  const previewVideoRef = useRef<HTMLVideoElement | null>(null);
 
-  // Auto-start recording on SOS
+  // Auto-start camera video recording and audio recording on SOS
   useEffect(() => {
     if (!isSosActive) return;
 
@@ -52,6 +62,21 @@ export const EmergencySosScreen: React.FC = () => {
       setRecordingSeconds((prev) => prev + 1);
     }, 1000);
 
+    videoIntervalRef.current = window.setInterval(() => {
+      setVideoSeconds((prev) => prev + 1);
+    }, 1000);
+
+    // Initialize camera video recording
+    startCameraRecording(previewVideoRef.current).then((res) => {
+      if (!res.success) {
+        console.warn('Camera video recording auto-start:', res.error);
+        setCameraError(res.error || 'Camera unavailable');
+      } else {
+        setCameraError(null);
+      }
+    });
+
+    // Independent audio recording fallback
     try {
       if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
         navigator.mediaDevices
@@ -62,42 +87,47 @@ export const EmergencySosScreen: React.FC = () => {
             audioChunksRef.current = [];
 
             recorder.ondataavailable = (e) => {
-              if (e.data.size > 0) audioChunksRef.current.push(e.data);
+              if (e.data && e.data.size > 0) audioChunksRef.current.push(e.data);
             };
 
             recorder.onstop = () => {
               const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-              const audioUrl = URL.createObjectURL(audioBlob);
-              addEvidenceRecord({
-                type: 'audio',
-                coords: currentLocation,
-                address: `SOS Audio Evidence (${recordingSeconds}s)`,
-                notes: `Emergency recording captured during SOS alert (${sosReason})`,
-                audioBlobUrl: audioUrl,
-                syncedToCloud: true,
-              });
+              if (audioBlob.size > 0) {
+                const audioUrl = URL.createObjectURL(audioBlob);
+                addEvidenceRecord({
+                  type: 'audio',
+                  coords: currentLocation,
+                  address: `SOS Audio Evidence (${recordingSeconds}s)`,
+                  notes: `Emergency recording captured during SOS alert (${sosReason})`,
+                  audioBlobUrl: audioUrl,
+                  syncedToCloud: true,
+                  fileSizeBytes: audioBlob.size,
+                });
+              }
               stream.getTracks().forEach((track) => track.stop());
             };
 
-            recorder.start();
+            recorder.start(1000);
           })
           .catch((err) => {
-            console.warn('Microphone permission not granted for SOS recording:', err);
+            console.warn('Microphone permission fallback note:', err);
           });
       }
     } catch (e) {
-      console.warn('Audio recording failed:', e);
+      console.warn('Audio recorder startup note:', e);
     }
 
     return () => {
       if (recordIntervalRef.current) clearInterval(recordIntervalRef.current);
+      if (videoIntervalRef.current) clearInterval(videoIntervalRef.current);
+
       if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
         try {
           mediaRecorderRef.current.stop();
         } catch {}
       }
     };
-  }, [isSosActive, currentLocation, sosReason, addEvidenceRecord]);
+  }, [isSosActive, currentLocation, sosReason, addEvidenceRecord, startCameraRecording]);
 
   if (!isSosActive) return null;
 
@@ -117,11 +147,20 @@ export const EmergencySosScreen: React.FC = () => {
     showToast(`WhatsApp alert opened for ${contact.name}`);
   };
 
-  const handleStopRecording = () => {
+  const handleStopAudioRecording = () => {
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
       mediaRecorderRef.current.stop();
       setIsRecordingAudio(false);
-      showToast('Audio evidence saved to Vault');
+      showToast('Audio evidence finalized and saved to Vault');
+    }
+  };
+
+  const handleStopVideoRecording = async () => {
+    if (isCameraRecording) {
+      const saved = await stopCameraRecording();
+      if (saved) {
+        showToast('Video evidence saved and cryptographically sealed.');
+      }
     }
   };
 
@@ -132,9 +171,11 @@ export const EmergencySosScreen: React.FC = () => {
   };
 
   return (
-    <div className={`fixed inset-0 z-50 flex flex-col justify-between overflow-y-auto ${
-      isStrobeActive ? 'animate-pulse bg-red-600' : 'bg-slate-950'
-    } text-white transition-colors duration-200`}>
+    <div
+      className={`fixed inset-0 z-50 flex flex-col justify-between overflow-y-auto ${
+        isStrobeActive ? 'animate-pulse bg-red-600' : 'bg-slate-950'
+      } text-white transition-colors duration-200`}
+    >
       {/* Top Banner */}
       <div className="p-4 sm:p-6 pt-6 max-w-2xl mx-auto w-full">
         <div className="flex items-center justify-between pb-3 border-b border-white/20">
@@ -191,6 +232,59 @@ export const EmergencySosScreen: React.FC = () => {
               <span>View Map</span>
               <Share2 className="w-3.5 h-3.5" />
             </a>
+          </div>
+        </div>
+
+        {/* Live Camera Viewfinder & Video Evidence */}
+        <div className="mt-4 p-4 rounded-2xl bg-white/10 backdrop-blur-md border border-white/20">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <div className="w-3 h-3 rounded-full bg-red-500 animate-ping" />
+              <span className="text-xs font-black uppercase tracking-wider text-red-300">
+                Camera Video Evidence Recorder
+              </span>
+            </div>
+            <span className="text-xs font-mono font-bold text-white bg-red-600/60 px-2 py-0.5 rounded-md">
+              REC {formatTimer(videoSeconds)}
+            </span>
+          </div>
+
+          {/* Viewfinder element */}
+          <div className="relative w-full h-44 rounded-xl overflow-hidden bg-black/80 flex items-center justify-center border border-white/20">
+            <video
+              ref={previewVideoRef}
+              autoPlay
+              playsInline
+              muted
+              className="w-full h-full object-cover"
+            />
+            {cameraError && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 p-4 text-center">
+                <VideoOff className="w-8 h-8 text-amber-400 mb-2" />
+                <span className="text-xs font-bold text-amber-200">{cameraError}</span>
+                <span className="text-[10px] text-slate-300 mt-1">Audio recording remains active.</span>
+              </div>
+            )}
+            {!cameraError && isCameraRecording && (
+              <div className="absolute top-2 left-2 flex items-center gap-1.5 bg-black/60 backdrop-blur-sm px-2 py-0.5 rounded-full text-[10px] font-mono text-red-400 font-bold border border-red-500/40">
+                <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                <span>LIVE FEED • 1080P/720P ENCODING</span>
+              </div>
+            )}
+          </div>
+
+          <div className="mt-3 flex items-center justify-between">
+            <span className="text-[11px] text-slate-300 font-medium">
+              Files are verified, hashed with SHA-256, and stored locally in IndexedDB & cloud.
+            </span>
+            {isCameraRecording && (
+              <button
+                onClick={handleStopVideoRecording}
+                className="text-[11px] font-black text-white px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 shadow-md transition cursor-pointer shrink-0 ml-2"
+              >
+                Stop & Save Video
+              </button>
+            )}
           </div>
         </div>
 
@@ -289,7 +383,7 @@ export const EmergencySosScreen: React.FC = () => {
           </div>
           {isRecordingAudio && (
             <button
-              onClick={handleStopRecording}
+              onClick={handleStopAudioRecording}
               className="text-[11px] font-black text-slate-200 hover:text-white px-2.5 py-1 rounded-lg bg-white/15 cursor-pointer"
             >
               Stop & Save
@@ -322,31 +416,29 @@ export const EmergencySosScreen: React.FC = () => {
                       </span>
                     )}
                   </div>
-                  <span className="text-xs text-slate-300 font-mono font-bold">{contact.phone}</span>
+                  <span className="text-[11px] text-slate-300 font-mono font-bold">{contact.phone}</span>
                 </div>
 
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-2">
                   <button
                     onClick={() => handleDispatchWhatsApp(contact)}
-                    className="p-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white flex items-center justify-center active:scale-95 transition cursor-pointer"
-                    title="Send WhatsApp Alert with GPS beacon"
+                    className={`h-9 px-3 rounded-xl text-xs font-black flex items-center gap-1.5 transition cursor-pointer ${
+                      sentAlerts[contact.id]
+                        ? 'bg-indigo-600 text-white'
+                        : 'bg-white/20 hover:bg-white/30 text-white'
+                    }`}
                   >
-                    <MessageSquare className="w-4 h-4" />
+                    <MessageSquare className="w-3.5 h-3.5" />
+                    <span>{sentAlerts[contact.id] ? 'Sent' : 'WhatsApp'}</span>
                   </button>
+
                   <button
                     onClick={() => handleDispatchSms(contact)}
-                    className="p-2 rounded-xl bg-white/20 hover:bg-white/30 text-white flex items-center justify-center active:scale-95 transition cursor-pointer"
-                    title="Send SMS Alert with GPS beacon"
+                    className="h-9 px-3 rounded-xl bg-white/20 hover:bg-white/30 text-white text-xs font-black flex items-center gap-1.5 transition cursor-pointer"
                   >
-                    <Share2 className="w-4 h-4" />
+                    <Phone className="w-3.5 h-3.5" />
+                    <span>SMS</span>
                   </button>
-                  <a
-                    href={`tel:${contact.phone}`}
-                    className="p-2 rounded-xl bg-red-600 hover:bg-red-700 text-white flex items-center justify-center active:scale-95 transition cursor-pointer"
-                    title="Direct Phone Call"
-                  >
-                    <Phone className="w-4 h-4" />
-                  </a>
                 </div>
               </div>
             ))}
@@ -354,11 +446,11 @@ export const EmergencySosScreen: React.FC = () => {
         </div>
       </div>
 
-      {/* Cancellation PIN Modal */}
+      {/* PIN Cancellation Modal */}
       <PinDialog
         isOpen={showPinModal}
-        title="Cancel Emergency SOS"
-        subtitle="Enter your 4-digit security PIN to confirm you are safe and disable the alert."
+        title="Authenticate to Cancel SOS"
+        subtitle="Enter your 4-digit security PIN to deactivate emergency broadcast."
         onSuccess={(pin) => {
           const res = cancelSosWithPin(pin);
           if (res.success) {

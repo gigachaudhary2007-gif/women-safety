@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Timer,
   PhoneCall,
@@ -16,15 +16,32 @@ import {
   PhoneIncoming,
   ChevronLeft,
   Sparkles,
+  Video,
+  VideoOff,
+  Camera,
+  FileCheck,
 } from 'lucide-react';
 import { useSafety } from '../../context/SafetyContext';
 import { soundManager } from '../../utils/audio';
 
 export const SafetyToolsScreen: React.FC = () => {
-  const { triggerSos, currentLocation, addEvidenceRecord, setActiveTab, showToast } = useSafety();
+  const {
+    triggerSos,
+    currentLocation,
+    addEvidenceRecord,
+    setActiveTab,
+    showToast,
+    isCameraRecording,
+    startCameraRecording,
+    stopCameraRecording,
+    isVoiceMonitoringActive,
+    toggleVoiceMonitoring,
+    voiceStatusMessage,
+    settings,
+  } = useSafety();
 
   const [activeToolModal, setActiveToolModal] = useState<
-    'safewalk' | 'fakecall' | 'voicetrigger' | 'report' | 'legalguide' | null
+    'safewalk' | 'fakecall' | 'voicetrigger' | 'camerarecord' | 'report' | 'legalguide' | null
   >(null);
 
   // 1. Safe-Walk Timer
@@ -40,10 +57,13 @@ export const SafetyToolsScreen: React.FC = () => {
   const [fakeCallDuration, setFakeCallDuration] = useState<number>(0);
   const fakeCallTimerRef = useRef<number | null>(null);
 
-  // 3. Voice Trigger
-  const [isVoiceListening, setIsVoiceListening] = useState<boolean>(false);
-  const [detectedSpeech, setDetectedSpeech] = useState<string>('');
-  const recognitionRef = useRef<unknown>(null);
+  // 3. Camera Video Evidence Recorder Tool
+  const [cameraViewActive, setCameraViewActive] = useState<boolean>(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [recordingSeconds, setRecordingSeconds] = useState<number>(0);
+  const [lastSavedVideoId, setLastSavedVideoId] = useState<string | null>(null);
+  const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
+  const recordingTimerRef = useRef<number | null>(null);
 
   // 4. Incident Report Form
   const [reportCategory, setReportCategory] = useState<string>('Poor Lighting / Broken Streetlamps');
@@ -113,54 +133,49 @@ export const SafetyToolsScreen: React.FC = () => {
     showToast('Fake call finished');
   };
 
-  // Voice Trigger Logic
-  const toggleVoiceTrigger = () => {
-    const SpeechRecognition =
-      (window as unknown as { SpeechRecognition?: unknown }).SpeechRecognition ||
-      (window as unknown as { webkitSpeechRecognition?: unknown }).webkitSpeechRecognition;
+  // Camera Video Evidence Recorder Logic
+  const handleOpenVideoTool = () => {
+    setActiveToolModal('camerarecord');
+    setCameraViewActive(true);
+    setCameraError(null);
+    setLastSavedVideoId(null);
+    setRecordingSeconds(0);
+  };
 
-    if (!SpeechRecognition) {
-      showToast('Speech recognition not supported in this browser');
-      return;
-    }
-
-    if (isVoiceListening) {
-      try {
-        (recognitionRef.current as { stop: () => void })?.stop();
-      } catch {}
-      showToast('Voice trigger deactivated');
+  const handleStartManualVideo = async () => {
+    setCameraError(null);
+    setRecordingSeconds(0);
+    const res = await startCameraRecording(cameraVideoRef.current);
+    if (res.success) {
+      if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = window.setInterval(() => {
+        setRecordingSeconds((prev) => prev + 1);
+      }, 1000);
     } else {
-      try {
-        const recognition = new (SpeechRecognition as any)();
-        recognition.continuous = true;
-        recognition.interimResults = true;
-
-        recognition.onresult = (event: any) => {
-          const results = event.results;
-          if (!results || results.length === 0) return;
-          const transcript = results[results.length - 1][0].transcript.toLowerCase();
-          setDetectedSpeech(transcript);
-
-          if (transcript.includes('help') || transcript.includes('emergency') || transcript.includes('save me')) {
-            soundManager.playBeep(990, 0.4);
-            triggerSos('Voice Emergency Phrase Detected ("' + transcript + '")');
-            recognition.stop();
-            setIsVoiceListening(false);
-          }
-        };
-
-        recognition.onerror = () => {
-          setIsVoiceListening(false);
-        };
-
-        recognition.start();
-        recognitionRef.current = recognition;
-        setIsVoiceListening(true);
-        showToast('Listening for "Help" or "Emergency"...');
-      } catch {
-        showToast('Voice recognition initialization failed');
-      }
+      setCameraError(res.error || 'Camera could not be engaged');
     }
+  };
+
+  const handleStopManualVideo = async () => {
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+    const savedRecord = await stopCameraRecording();
+    if (savedRecord) {
+      setLastSavedVideoId(savedRecord.id);
+      showToast('Video saved to Vault & cryptographically hashed.');
+    } else {
+      showToast('Recording ended (no non-zero file generated)');
+    }
+  };
+
+  const handleCloseVideoModal = () => {
+    if (isCameraRecording) {
+      handleStopManualVideo();
+    }
+    setActiveToolModal(null);
+    setCameraViewActive(false);
   };
 
   const handleReportSubmit = (e: React.FormEvent) => {
@@ -207,7 +222,7 @@ export const SafetyToolsScreen: React.FC = () => {
               Safety Defense Toolkit
             </h1>
             <span className="text-xs font-bold text-slate-700 dark:text-slate-300 hidden sm:inline">
-              Tactical alibis, automated timers, and vocal distress recognition
+              Tactical alibis, camera video evidence recording, and vocal distress recognition
             </span>
           </div>
         </div>
@@ -244,7 +259,34 @@ export const SafetyToolsScreen: React.FC = () => {
       {/* Grid of Tools */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
         
-        {/* Tool 1: Safe-Walk Timer */}
+        {/* Tool 1: Camera Video Evidence Recorder */}
+        <div
+          onClick={handleOpenVideoTool}
+          className="glass-panel rounded-[32px] p-6 border border-slate-200 dark:border-indigo-900/50 hover:bg-white dark:hover:bg-slate-800/80 active:scale-98 transition cursor-pointer shadow-xs group flex flex-col justify-between"
+        >
+          <div>
+            <div className="w-12 h-12 rounded-2xl bg-indigo-600/15 text-indigo-700 dark:text-indigo-400 flex items-center justify-center mb-4 group-hover:scale-105 transition-transform border border-indigo-500/20">
+              <Video className="w-6 h-6 stroke-[2.4]" />
+            </div>
+            <div className="flex items-center gap-2">
+              <h3 className="text-base font-black text-slate-900 dark:text-white">Camera Video Recorder</h3>
+              {isCameraRecording && (
+                <span className="text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-red-600 text-white animate-pulse">
+                  REC
+                </span>
+              )}
+            </div>
+            <p className="text-xs font-bold text-slate-700 dark:text-slate-300 mt-1.5 leading-relaxed">
+              Capture video and audio evidence. Automatically validated for non-zero size, sealed with SHA-256, and stored securely in local IndexedDB and cloud storage.
+            </p>
+          </div>
+          <span className="text-xs font-black text-indigo-600 dark:text-indigo-400 mt-4 pt-3 border-t border-slate-200 dark:border-indigo-900/40 flex items-center justify-between">
+            <span>{isCameraRecording ? 'Active Recording' : 'Open Camera Recorder'}</span>
+            <span>&rarr;</span>
+          </span>
+        </div>
+
+        {/* Tool 2: Safe-Walk Timer */}
         <div
           onClick={() => setActiveToolModal('safewalk')}
           className="glass-panel rounded-[32px] p-6 border border-slate-200 dark:border-indigo-900/50 hover:bg-white dark:hover:bg-slate-800/80 active:scale-98 transition cursor-pointer shadow-xs group flex flex-col justify-between"
@@ -264,7 +306,7 @@ export const SafetyToolsScreen: React.FC = () => {
           </span>
         </div>
 
-        {/* Tool 2: Fake Call Simulator */}
+        {/* Tool 3: Fake Call Simulator */}
         <div
           onClick={() => setActiveToolModal('fakecall')}
           className="glass-panel rounded-[32px] p-6 border border-slate-200 dark:border-indigo-900/50 hover:bg-white dark:hover:bg-slate-800/80 active:scale-98 transition cursor-pointer shadow-xs group flex flex-col justify-between"
@@ -284,27 +326,34 @@ export const SafetyToolsScreen: React.FC = () => {
           </span>
         </div>
 
-        {/* Tool 3: Voice Keyword Trigger */}
+        {/* Tool 4: Voice Keyword Trigger */}
         <div
           onClick={() => setActiveToolModal('voicetrigger')}
           className="glass-panel rounded-[32px] p-6 border border-slate-200 dark:border-indigo-900/50 hover:bg-white dark:hover:bg-slate-800/80 active:scale-98 transition cursor-pointer shadow-xs group flex flex-col justify-between"
         >
           <div>
             <div className="w-12 h-12 rounded-2xl bg-blue-600/15 text-blue-700 dark:text-blue-400 flex items-center justify-center mb-4 group-hover:scale-105 transition-transform border border-blue-500/20">
-              <Mic className={`w-6 h-6 stroke-[2.4] ${isVoiceListening ? 'text-red-500 animate-pulse' : ''}`} />
+              <Mic className={`w-6 h-6 stroke-[2.4] ${isVoiceMonitoringActive ? 'text-red-500 animate-pulse' : ''}`} />
             </div>
-            <h3 className="text-base font-black text-slate-900 dark:text-white">Voice Trigger</h3>
+            <div className="flex items-center gap-2">
+              <h3 className="text-base font-black text-slate-900 dark:text-white">Voice Trigger Sentry</h3>
+              {isVoiceMonitoringActive && (
+                <span className="text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-indigo-600 text-white animate-pulse">
+                  Active
+                </span>
+              )}
+            </div>
             <p className="text-xs font-bold text-slate-700 dark:text-slate-300 mt-1.5 leading-relaxed">
-              Hands-free microphone detection for vocal distress phrases like "Help" or "Emergency".
+              Hands-free microphone detection listening for <strong>"{settings.voicePhrase || 'SafeJourney, Help'}"</strong> even when shouted or distorted.
             </p>
           </div>
           <span className="text-xs font-black text-indigo-600 dark:text-indigo-400 mt-4 pt-3 border-t border-slate-200 dark:border-indigo-900/40 flex items-center justify-between">
-            <span>{isVoiceListening ? 'Active (Tap to Stop)' : 'Start Listening'}</span>
+            <span>{isVoiceMonitoringActive ? 'Active (Tap to Stop)' : 'Start Sentry'}</span>
             <span>&rarr;</span>
           </span>
         </div>
 
-        {/* Tool 4: Anonymous Incident Reporter */}
+        {/* Tool 5: Anonymous Incident Reporter */}
         <div
           onClick={() => setActiveToolModal('report')}
           className="glass-panel rounded-[32px] p-6 border border-slate-200 dark:border-indigo-900/50 hover:bg-white dark:hover:bg-slate-800/80 active:scale-98 transition cursor-pointer shadow-xs group flex flex-col justify-between"
@@ -324,10 +373,10 @@ export const SafetyToolsScreen: React.FC = () => {
           </span>
         </div>
 
-        {/* Tool 5: Legal Rights Handbook */}
+        {/* Tool 6: Legal Rights Handbook */}
         <div
           onClick={() => setActiveToolModal('legalguide')}
-          className="lg:col-span-2 glass-panel rounded-[32px] p-6 border border-slate-200 dark:border-indigo-900/50 hover:bg-white dark:hover:bg-slate-800/80 active:scale-98 transition cursor-pointer shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+          className="glass-panel rounded-[32px] p-6 border border-slate-200 dark:border-indigo-900/50 hover:bg-white dark:hover:bg-slate-800/80 active:scale-98 transition cursor-pointer shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4"
         >
           <div className="flex items-start gap-4">
             <div className="w-12 h-12 rounded-2xl bg-violet-600/15 text-violet-700 dark:text-violet-400 flex items-center justify-center shrink-0 border border-violet-500/20">
@@ -335,19 +384,119 @@ export const SafetyToolsScreen: React.FC = () => {
             </div>
             <div>
               <h3 className="text-base font-black text-slate-900 dark:text-white">
-                Legal Rights & Self-Defense Handbook
+                Legal Rights & Self-Defense
               </h3>
               <p className="text-xs font-bold text-slate-700 dark:text-slate-300 mt-1 leading-relaxed max-w-lg">
-                Understand Zero FIR provisions, confidential statement rights, and electronic evidence admissibility for digital logs.
+                Understand Zero FIR provisions, confidential statements, and electronic evidence admissibility.
               </p>
             </div>
           </div>
           <span className="text-xs font-black text-indigo-600 dark:text-indigo-400 shrink-0 self-end sm:self-center">
-            Read Handbook &rarr;
+            Read &rarr;
           </span>
         </div>
 
       </div>
+
+      {/* MODAL: Camera Video Evidence Recorder */}
+      {activeToolModal === 'camerarecord' && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-fadeIn">
+          <div className="glass-panel-elevated w-full max-w-lg rounded-[32px] p-6 lg:p-7 shadow-2xl border border-slate-200 dark:border-indigo-900/60 overflow-hidden">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-200 dark:border-indigo-900/40">
+              <div className="flex items-center gap-2">
+                <Video className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+                <h3 className="text-base font-black text-slate-900 dark:text-white">
+                  Camera Video Evidence Recorder
+                </h3>
+              </div>
+              <button
+                onClick={handleCloseVideoModal}
+                className="w-8 h-8 rounded-full flex items-center justify-center text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Video Viewfinder Container */}
+            <div className="mt-4 relative w-full h-56 rounded-2xl bg-black overflow-hidden flex items-center justify-center border border-slate-300 dark:border-indigo-900/50">
+              <video
+                ref={cameraVideoRef}
+                autoPlay
+                playsInline
+                muted
+                className="w-full h-full object-cover"
+              />
+
+              {cameraError && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 p-4 text-center">
+                  <VideoOff className="w-8 h-8 text-amber-400 mb-2" />
+                  <span className="text-xs font-bold text-amber-200">{cameraError}</span>
+                  <span className="text-[10px] text-slate-400 mt-1">Please ensure camera permissions are allowed.</span>
+                </div>
+              )}
+
+              {isCameraRecording && (
+                <div className="absolute top-3 left-3 flex items-center gap-2 bg-red-600 text-white px-3 py-1 rounded-full text-xs font-mono font-bold shadow-lg animate-pulse">
+                  <span className="w-2 h-2 rounded-full bg-white" />
+                  <span>REC {formatTimer(recordingSeconds)}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Status and Diagnostics */}
+            <div className="mt-3 p-3 rounded-xl bg-slate-100 dark:bg-slate-800/60 border border-slate-200 dark:border-indigo-900/40 text-xs font-bold text-slate-700 dark:text-slate-300">
+              <div className="flex items-center justify-between">
+                <span>Storage Target:</span>
+                <span className="font-mono text-indigo-700 dark:text-indigo-300">IndexedDB & Supabase Vault</span>
+              </div>
+              <div className="flex items-center justify-between mt-1">
+                <span>Cryptographic Proof:</span>
+                <span className="font-mono text-slate-900 dark:text-white">SHA-256 Hash Seal</span>
+              </div>
+            </div>
+
+            {/* Success notification if just recorded */}
+            {lastSavedVideoId && !isCameraRecording && (
+              <div className="mt-3 p-3 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 flex items-center justify-between">
+                <div className="flex items-center gap-2 text-xs font-black text-indigo-950 dark:text-indigo-200">
+                  <CheckCircle2 className="w-4 h-4 text-indigo-600" />
+                  <span>Video saved and sealed</span>
+                </div>
+                <button
+                  onClick={() => {
+                    setActiveToolModal(null);
+                    setActiveTab('evidence');
+                  }}
+                  className="text-xs font-black text-indigo-600 dark:text-indigo-400 underline cursor-pointer"
+                >
+                  View in Vault &rarr;
+                </button>
+              </div>
+            )}
+
+            {/* Controls */}
+            <div className="mt-5 flex gap-2.5">
+              {!isCameraRecording ? (
+                <button
+                  onClick={handleStartManualVideo}
+                  className="flex-1 h-12 rounded-full bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-black shadow-md shadow-indigo-600/30 flex items-center justify-center gap-2 transition cursor-pointer"
+                >
+                  <Camera className="w-4 h-4" />
+                  <span>Start Recording Video</span>
+                </button>
+              ) : (
+                <button
+                  onClick={handleStopManualVideo}
+                  className="flex-1 h-12 rounded-full bg-red-600 hover:bg-red-700 text-white text-xs font-black shadow-md shadow-red-600/30 flex items-center justify-center gap-2 transition cursor-pointer"
+                >
+                  <Square className="w-4 h-4 fill-white" />
+                  <span>Stop & Save Video ({formatTimer(recordingSeconds)})</span>
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* MODAL 1: Safe-Walk Timer */}
       {activeToolModal === 'safewalk' && (
@@ -449,51 +598,14 @@ export const SafetyToolsScreen: React.FC = () => {
                   ))}
                 </div>
               </div>
-            </div>
 
-            <div className="pt-4 mt-2 border-t border-slate-200 dark:border-indigo-900/40">
               <button
                 onClick={scheduleFakeCall}
-                className="w-full h-12 rounded-full bg-indigo-600 text-white text-xs font-black shadow-md shadow-indigo-600/30 hover:bg-indigo-700 cursor-pointer"
+                className="w-full h-12 rounded-full bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-black shadow-md shadow-amber-500/25 cursor-pointer mt-2"
               >
                 Trigger Incoming Call
               </button>
             </div>
-          </div>
-        </div>
-      )}
-
-      {/* FULL SCREEN INCOMING FAKE CALL */}
-      {isFakeCallRinging && (
-        <div className="fixed inset-0 z-50 flex flex-col justify-between p-8 bg-slate-950 text-white animate-fadeIn">
-          <div className="text-center pt-12">
-            <span className="text-xs uppercase font-black tracking-widest text-indigo-400 block mb-2">
-              Incoming Call...
-            </span>
-            <h2 className="text-3xl font-black text-white tracking-tight">{fakeCallerName}</h2>
-            <p className="text-xs text-slate-400 mt-1">Mobile Carrier</p>
-          </div>
-
-          <div className="flex justify-center my-auto">
-            <div className="w-32 h-32 rounded-full bg-indigo-600/20 border-2 border-indigo-400 flex items-center justify-center text-white text-4xl font-extrabold animate-pulse">
-              {fakeCallerName.charAt(0)}
-            </div>
-          </div>
-
-          <div className="flex items-center justify-around pb-8 max-w-sm mx-auto w-full">
-            <button
-              onClick={endFakeCall}
-              className="w-20 h-20 rounded-full bg-red-600 text-white flex flex-col items-center justify-center shadow-xl active:scale-95 transition cursor-pointer"
-            >
-              <PhoneCall className="w-8 h-8 rotate-[135deg]" />
-            </button>
-
-            <button
-              onClick={acceptFakeCall}
-              className="w-20 h-20 rounded-full bg-indigo-600 text-white flex flex-col items-center justify-center shadow-xl animate-bounce active:scale-95 transition cursor-pointer"
-            >
-              <PhoneCall className="w-8 h-8" />
-            </button>
           </div>
         </div>
       )}
@@ -535,7 +647,7 @@ export const SafetyToolsScreen: React.FC = () => {
             <div className="flex items-center justify-between pb-3 border-b border-slate-200 dark:border-indigo-900/40">
               <div className="flex items-center gap-2">
                 <Mic className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
-                <h3 className="text-base font-black text-slate-900 dark:text-white">Voice Trigger Detector</h3>
+                <h3 className="text-base font-black text-slate-900 dark:text-white">Voice Trigger Sentry</h3>
               </div>
               <button
                 onClick={() => setActiveToolModal(null)}
@@ -546,32 +658,39 @@ export const SafetyToolsScreen: React.FC = () => {
             </div>
 
             <p className="text-xs font-bold text-slate-700 dark:text-slate-300 mt-3 leading-relaxed">
-              When active, your browser monitors for vocal distress phrases like <strong>"Help"</strong>, <strong>"Save me"</strong>, or <strong>"Emergency"</strong>.
+              When armed, SafeJourney continuously monitors for the emergency wake-phrase:{' '}
+              <span className="text-indigo-700 dark:text-indigo-300 font-black">
+                "{settings.voicePhrase || 'SafeJourney, Help'}"
+              </span>. Shouting, pause variations, and phonetic distortions are automatically matched.
             </p>
 
             <div className="my-5 p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-indigo-900/40 text-center">
               <span className="text-[10px] uppercase font-black text-indigo-600 dark:text-indigo-400 block mb-1">
-                Listening Status
+                Sentry Engine Status
               </span>
-              <span className={`text-sm font-black block ${isVoiceListening ? 'text-red-500 animate-pulse' : 'text-slate-700 dark:text-slate-300'}`}>
-                {isVoiceListening ? 'Microphone Active · Listening...' : 'Inactive'}
+              <span
+                className={`text-sm font-black block ${
+                  isVoiceMonitoringActive ? 'text-indigo-700 dark:text-indigo-300 animate-pulse' : 'text-slate-700 dark:text-slate-300'
+                }`}
+              >
+                {isVoiceMonitoringActive ? 'Active • Sentry Armed' : 'Standby / Inactive'}
               </span>
-              {detectedSpeech && (
-                <p className="text-xs font-mono font-bold text-slate-900 dark:text-white mt-2 bg-slate-200 dark:bg-slate-700 p-2.5 rounded-xl">
-                  "{detectedSpeech}"
-                </p>
-              )}
+              <p className="text-xs font-mono font-bold text-slate-900 dark:text-white mt-2 bg-slate-200 dark:bg-slate-700 p-2.5 rounded-xl">
+                {voiceStatusMessage}
+              </p>
             </div>
 
             <button
-              onClick={toggleVoiceTrigger}
+              onClick={() => {
+                toggleVoiceMonitoring();
+              }}
               className={`w-full h-12 rounded-full text-xs font-black shadow-md transition cursor-pointer ${
-                isVoiceListening
+                isVoiceMonitoringActive
                   ? 'bg-red-600 text-white hover:bg-red-700'
                   : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-600/30'
               }`}
             >
-              {isVoiceListening ? 'Stop Listening' : 'Activate Voice Detection'}
+              {isVoiceMonitoringActive ? 'Deactivate Voice Sentry' : 'Arm Voice Trigger Now'}
             </button>
           </div>
         </div>
@@ -598,7 +717,9 @@ export const SafetyToolsScreen: React.FC = () => {
               <div className="py-8 text-center text-indigo-700 dark:text-indigo-400">
                 <CheckCircle2 className="w-12 h-12 mx-auto mb-2 text-indigo-600" />
                 <h4 className="text-base font-black">Hazard Report Logged</h4>
-                <p className="text-xs font-bold text-slate-700 dark:text-slate-300 mt-1">Thank you for contributing to safer communities.</p>
+                <p className="text-xs font-bold text-slate-700 dark:text-slate-300 mt-1">
+                  Thank you for contributing to community corridor safety.
+                </p>
               </div>
             ) : (
               <form onSubmit={handleReportSubmit} className="space-y-4 mt-4">
@@ -609,38 +730,34 @@ export const SafetyToolsScreen: React.FC = () => {
                   <select
                     value={reportCategory}
                     onChange={(e) => setReportCategory(e.target.value)}
-                    className="w-full h-11 px-4 rounded-xl bg-white dark:bg-slate-800/80 border border-slate-300 dark:border-indigo-900/50 text-xs font-bold text-slate-900 dark:text-white"
+                    className="w-full h-11 px-3 rounded-xl bg-white dark:bg-slate-800/80 border border-slate-300 dark:border-indigo-900/50 text-xs font-bold text-slate-900 dark:text-white"
                   >
-                    <option value="Poor Lighting / Broken Streetlamps">Poor Lighting / Broken Streetlamps</option>
-                    <option value="Verbal Harassment / Catcalling">Verbal Harassment / Catcalling</option>
-                    <option value="Suspicious Stalking / Follower">Suspicious Stalking / Follower</option>
-                    <option value="Deserted Transit Corridor">Deserted Transit Corridor</option>
-                    <option value="Other Safety Hazard">Other Safety Hazard</option>
+                    <option>Poor Lighting / Broken Streetlamps</option>
+                    <option>Catcalling / Street Harassment</option>
+                    <option>Isolated Alley / Deserted Stretch</option>
+                    <option>Unregistered Cab / Suspicious Vehicle</option>
                   </select>
                 </div>
 
                 <div>
                   <label className="text-xs font-black text-slate-900 dark:text-white block mb-1">
-                    Details & Specific Location Notes
+                    Observations & Notes
                   </label>
                   <textarea
                     rows={3}
                     value={reportDescription}
                     onChange={(e) => setReportDescription(e.target.value)}
-                    placeholder="Describe specific spot, landmark, timing..."
-                    className="w-full p-3 rounded-xl bg-white dark:bg-slate-800/80 border border-slate-300 dark:border-indigo-900/50 text-xs font-bold text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500"
+                    placeholder="Describe context (e.g. 2 men loitering near metro exit 4)..."
+                    className="w-full p-3 rounded-xl bg-white dark:bg-slate-800/80 border border-slate-300 dark:border-indigo-900/50 text-xs font-bold text-slate-900 dark:text-white resize-none"
                   />
-                </div>
-
-                <div className="p-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-[10px] font-bold text-slate-700 dark:text-slate-300">
-                  GPS Tag attached: {currentLocation.lat.toFixed(4)}, {currentLocation.lng.toFixed(4)}. No identifying personal records saved.
                 </div>
 
                 <button
                   type="submit"
-                  className="w-full h-12 rounded-full bg-indigo-600 text-white text-xs font-black shadow-md shadow-indigo-600/30 hover:bg-indigo-700 cursor-pointer"
+                  className="w-full h-12 rounded-full bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-black shadow-md shadow-amber-500/25 flex items-center justify-center gap-2 cursor-pointer"
                 >
-                  Submit Anonymous Hazard Report
+                  <Send className="w-4 h-4" />
+                  <span>Submit Anonymous Safety Report</span>
                 </button>
               </form>
             )}
@@ -648,14 +765,16 @@ export const SafetyToolsScreen: React.FC = () => {
         </div>
       )}
 
-      {/* MODAL 5: Legal Guide */}
+      {/* MODAL 5: Legal Rights Handbook */}
       {activeToolModal === 'legalguide' && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-fadeIn">
-          <div className="glass-panel-elevated w-full max-w-lg rounded-[32px] p-6 lg:p-7 shadow-2xl border border-slate-200 dark:border-indigo-900/60 max-h-[85vh] overflow-y-auto">
+          <div className="glass-panel-elevated w-full max-w-xl rounded-[32px] p-6 lg:p-7 shadow-2xl border border-slate-200 dark:border-indigo-900/60 max-h-[85vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-slate-200 dark:border-indigo-900/40">
               <div className="flex items-center gap-2">
                 <BookOpen className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
-                <h3 className="text-base font-black text-slate-900 dark:text-white">Legal & Rights Handbook</h3>
+                <h3 className="text-base font-black text-slate-900 dark:text-white">
+                  Legal Rights & Defense Handbook
+                </h3>
               </div>
               <button
                 onClick={() => setActiveToolModal(null)}
@@ -665,25 +784,25 @@ export const SafetyToolsScreen: React.FC = () => {
               </button>
             </div>
 
-            <div className="space-y-4 mt-4 text-xs text-slate-800 dark:text-slate-200">
+            <div className="space-y-4 mt-4 text-xs">
               <div>
-                <h4 className="font-black text-indigo-700 dark:text-indigo-400 text-sm">1. Zero FIR Provision</h4>
+                <h4 className="font-black text-indigo-700 dark:text-indigo-400 text-sm">1. Right to Zero FIR</h4>
                 <p className="font-bold text-slate-700 dark:text-slate-300 mt-1 leading-relaxed">
-                  A woman can register a police First Information Report (FIR) at any police station regardless of jurisdictional boundaries. The police cannot refuse registration.
+                  A victim can file an FIR at ANY police station regardless of jurisdiction where the incident occurred. The police must register it and transfer it later.
                 </p>
               </div>
 
               <div>
-                <h4 className="font-black text-indigo-700 dark:text-indigo-400 text-sm">2. Confidential Statements</h4>
+                <h4 className="font-black text-indigo-700 dark:text-indigo-400 text-sm">2. Confidential In-Camera Statements</h4>
                 <p className="font-bold text-slate-700 dark:text-slate-300 mt-1 leading-relaxed">
-                  Under legal protections, statements of women victims can be recorded in the presence of a woman police officer or in private quarters without unauthorized male presence.
+                  Women have the statutory right to have statements recorded before a female judicial magistrate or female police officer in a secure, confidential environment.
                 </p>
               </div>
 
               <div>
                 <h4 className="font-black text-indigo-700 dark:text-indigo-400 text-sm">3. Digital Evidence Admissibility</h4>
                 <p className="font-bold text-slate-700 dark:text-slate-300 mt-1 leading-relaxed">
-                  GPS coordinate logs, audio recordings from SafeJourney, and timestamped distress beacon messages are admissible electronic evidence under evidence law.
+                  GPS coordinate logs, video recordings, and timestamped distress beacon messages from SafeJourney are valid electronic evidence under electronic evidence provisions.
                 </p>
               </div>
             </div>
