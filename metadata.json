@@ -1,0 +1,12 @@
+{
+  "name": "SafeJourney",
+  "description": "Professional women's safety & journey guard application with real-time tracking, proactive deviation alerts, emergency SOS, and liquid glassmorphism design.",
+  "requestFramePermissions": [
+    "geolocation",
+    "microphone",
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
