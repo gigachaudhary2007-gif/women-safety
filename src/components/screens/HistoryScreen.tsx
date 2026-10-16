@@ -214,12 +214,24 @@ export const HistoryScreen: React.FC = () => {
                           {(item.raw as any).notificationAttempts.map((attempt: any, idx: number) => (
                             <div
                               key={idx}
-                              className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 flex items-center gap-1"
+                              className={`text-[10px] font-bold px-2 py-0.5 rounded-md bg-white dark:bg-slate-900 border flex items-center gap-1 ${
+                                attempt.status === 'PROVIDER_UNCONFIGURED'
+                                  ? 'border-amber-300 dark:border-amber-800 text-amber-800 dark:text-amber-300'
+                                  : 'border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200'
+                              }`}
                             >
                               <Send className="w-2.5 h-2.5 text-indigo-600" />
                               <span>{attempt.contactName}:</span>
-                              <span className="font-extrabold text-indigo-700 dark:text-indigo-400">
-                                {attempt.status}
+                              <span
+                                className={`font-extrabold ${
+                                  attempt.status === 'PROVIDER_UNCONFIGURED'
+                                    ? 'text-amber-600 dark:text-amber-400'
+                                    : 'text-indigo-700 dark:text-indigo-400'
+                                }`}
+                              >
+                                {attempt.status === 'PROVIDER_UNCONFIGURED'
+                                  ? 'Provider Not Configured'
+                                  : attempt.status}
                               </span>
                             </div>
                           ))}

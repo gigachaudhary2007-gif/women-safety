@@ -13,10 +13,22 @@ import { HistoryScreen } from './components/screens/HistoryScreen';
 import { EmergencySosScreen } from './components/screens/EmergencySosScreen';
 import { CountdownDialog } from './components/common/CountdownDialog';
 import { OnboardingScreen } from './components/screens/OnboardingScreen';
-import { Smartphone, Monitor, ShieldCheck, Wifi, Battery } from 'lucide-react';
+import { AuthScreen } from './components/screens/AuthScreen';
+import { Smartphone, Monitor, ShieldCheck, Wifi, Battery, X } from 'lucide-react';
 
 const MainApp: React.FC = () => {
-  const { user, updateUser, activeTab, toastMessage, theme, deviceView, setDeviceView } = useSafety();
+  const {
+    user,
+    updateUser,
+    activeTab,
+    setActiveTab,
+    toastMessage,
+    theme,
+    deviceView,
+    setDeviceView,
+    showAuthModal,
+    setShowAuthModal,
+  } = useSafety();
   const showOnboarding = !user.onboardingCompleted;
 
   if (showOnboarding) {
@@ -41,6 +53,13 @@ const MainApp: React.FC = () => {
         return <HistoryScreen />;
       case 'profile':
         return <ProfileSettingsScreen />;
+      case 'auth':
+        return (
+          <AuthScreen
+            onSuccess={() => setActiveTab('dashboard')}
+            onSkip={() => setActiveTab('dashboard')}
+          />
+        );
       default:
         return <DashboardScreen />;
     }
@@ -124,6 +143,25 @@ const MainApp: React.FC = () => {
 
       {/* Dedicated Emergency SOS Full Screen Interface */}
       <EmergencySosScreen />
+
+      {/* Supabase Authentication Modal Overlay */}
+      {showAuthModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-md animate-fadeIn">
+          <div className="relative w-full max-w-md max-h-[90vh] overflow-y-auto">
+            <button
+              onClick={() => setShowAuthModal(false)}
+              className="absolute right-4 top-4 z-10 w-9 h-9 rounded-2xl glass-panel flex items-center justify-center text-slate-600 dark:text-slate-300 hover:text-red-500 active:scale-95 transition cursor-pointer shadow-md"
+              aria-label="Close Authentication Modal"
+            >
+              <X className="w-4 h-4" />
+            </button>
+            <AuthScreen
+              onSuccess={() => setShowAuthModal(false)}
+              onSkip={() => setShowAuthModal(false)}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Tactile Feedback Toast Notification */}
       {toastMessage && (

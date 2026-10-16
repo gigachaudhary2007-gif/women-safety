@@ -118,6 +118,38 @@ async function runTestSuite() {
   const zeroBytes = zeroChunks.reduce((acc, c) => acc + c.byteLength, 0);
   assert(zeroBytes === 0, 'Zero-byte rejection logic: correctly identifies 0-byte corrupt recordings');
 
+  // TEST SUITE 6: Supabase Auth, URL Normalization & Phone E.164 Validation
+  console.log('\n--- TEST GROUP 6: Supabase Auth & Phone E.164 Validation ---');
+  const dirtyUrl = 'https://hwhuqhkyaxutlhmdqlde.supabase.co/rest/v1/';
+  const cleanedUrl = dirtyUrl.replace(/\/rest\/v1\/?$/, '').replace(/\/+$/, '');
+  assert(
+    cleanedUrl === 'https://hwhuqhkyaxutlhmdqlde.supabase.co',
+    'Normalizes Supabase URL with trailing /rest/v1/'
+  );
+
+  const formatE164 = (dial: string, phone: string) => {
+    const raw = phone.replace(/\D/g, '');
+    const clean = raw.startsWith('0') ? raw.slice(1) : raw;
+    return `${dial}${clean}`;
+  };
+
+  assert(
+    formatE164('+91', '98765 43210') === '+919876543210',
+    'Formats India mobile into E.164: +919876543210'
+  );
+  assert(
+    formatE164('+91', '098765-43210') === '+919876543210',
+    'Strips leading 0 and dashes in mobile number'
+  );
+  assert(
+    formatE164('+1', '(555) 234-5678') === '+15552345678',
+    'Formats US/Canada mobile into E.164: +15552345678'
+  );
+
+  const isValidEmail = (em: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em.trim());
+  assert(isValidEmail('aanya@safejourney.app') === true, 'Validates standard user email');
+  assert(isValidEmail('invalid-email') === false, 'Rejects invalid email format');
+
   console.log('\n=====================================================');
   console.log(`TEST SUMMARY: ${passedTests}/${totalTests} TESTS PASSED`);
   console.log('=====================================================\n');

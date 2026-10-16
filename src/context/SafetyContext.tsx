@@ -23,6 +23,24 @@ import {
   logEvidenceDeletionAudit,
   broadcastEmergencyToSupabase,
   isSupabaseConfigured,
+  supabase,
+  signOutSupabase,
+  fetchSupabaseProfile,
+  upsertSupabaseProfile,
+  fetchSupabaseContacts,
+  saveSupabaseContact,
+  deleteSupabaseContact,
+  saveSupabaseJourney,
+  updateSupabaseJourneyStatus,
+  saveSupabaseRoutePoints,
+  saveSupabaseLocationPing,
+  saveSupabaseEvidenceMetadata,
+  saveSupabaseSafetyConfirmation,
+  saveSupabaseNotificationAttempts,
+  getEvidenceSignedUrl,
+  fetchSupabaseEvidence,
+  fetchSupabaseEmergencyEvents,
+  fetchSupabaseAuditEvents,
 } from '../lib/supabase';
 import {
   calculateShortestDistanceToPolyline,
@@ -42,8 +60,8 @@ interface SafetyContextType {
   user: UserProfile;
   setUser: (u: UserProfile) => void;
   updateUser: (partial: Partial<UserProfile>) => void;
-  activeTab: 'dashboard' | 'journey' | 'map' | 'contacts' | 'tools' | 'profile' | 'evidence' | 'history';
-  setActiveTab: (tab: 'dashboard' | 'journey' | 'map' | 'contacts' | 'tools' | 'profile' | 'evidence' | 'history') => void;
+  activeTab: 'dashboard' | 'journey' | 'map' | 'contacts' | 'tools' | 'profile' | 'evidence' | 'history' | 'auth';
+  setActiveTab: (tab: 'dashboard' | 'journey' | 'map' | 'contacts' | 'tools' | 'profile' | 'evidence' | 'history' | 'auth') => void;
   theme: 'light' | 'dark';
   setTheme: (t: 'light' | 'dark') => void;
   deviceView: 'web' | 'mobile';
@@ -56,6 +74,13 @@ interface SafetyContextType {
 
   settings: JourneySettings;
   updateSettings: (s: Partial<JourneySettings>) => void;
+
+  // Supabase Auth Integration
+  supabaseUser: any | null;
+  supabaseSession: any | null;
+  signOutAction: () => Promise<void>;
+  showAuthModal: boolean;
+  setShowAuthModal: (open: boolean) => void;
 
   // Journey Guard State Machine & Polylines
   activeJourney: ActiveJourney | null;
@@ -129,6 +154,10 @@ const STORAGE_KEY_EVIDENCE = 'safejourney_evidence_v3';
 const STORAGE_KEY_AUDIT = 'safejourney_audit_v3';
 
 export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [supabaseSession, setSupabaseSession] = useState<any>(null);
+  const [supabaseUser, setSupabaseUser] = useState<any>(null);
+  const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
+
   // 1. User profile
   const [user, setUserState] = useState<UserProfile>(() => {
     try {
@@ -152,12 +181,21 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       try {
         localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(updated));
       } catch {}
+
+      // Real-time sync with Supabase if logged in
+      if (prev.isLoggedIn && isSupabaseConfigured && prev.id && !prev.id.startsWith('usr_safe')) {
+        upsertSupabaseProfile({
+          id: prev.id,
+          ...partial,
+        }).catch((err) => console.warn('Supabase profile sync note:', err));
+      }
+
       return updated;
     });
   };
 
   // 2. Navigation & View Modes
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'journey' | 'map' | 'contacts' | 'tools' | 'profile' | 'evidence' | 'history'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'journey' | 'map' | 'contacts' | 'tools' | 'profile' | 'evidence' | 'history' | 'auth'>('dashboard');
   const [theme, setThemeState] = useState<'light' | 'dark'>(() => {
     try {
       const saved = localStorage.getItem('safejourney_theme');
@@ -201,19 +239,152 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       ...c,
       id: `ct_${Date.now()}`,
     };
-    saveContacts([...contacts, newContact]);
+    const updated = [...contacts, newContact];
+    saveContacts(updated);
+    if (user.isLoggedIn && isSupabaseConfigured && user.id && !user.id.startsWith('usr_safe')) {
+      saveSupabaseContact(newContact, user.id).catch(() => {});
+    }
     showToast(`Added ${c.name} to trusted circle`);
   };
 
   const updateContact = (id: string, partial: Partial<TrustedContact>) => {
     const updated = contacts.map((c) => (c.id === id ? { ...c, ...partial } : c));
     saveContacts(updated);
+    const target = updated.find((c) => c.id === id);
+    if (target && user.isLoggedIn && isSupabaseConfigured && user.id && !user.id.startsWith('usr_safe')) {
+      saveSupabaseContact(target, user.id).catch(() => {});
+    }
     showToast('Contact updated');
   };
 
   const deleteContact = (id: string) => {
     saveContacts(contacts.filter((c) => c.id !== id));
+    if (user.isLoggedIn && isSupabaseConfigured) {
+      deleteSupabaseContact(id).catch(() => {});
+    }
     showToast('Contact removed');
+  };
+
+  // 3B. Supabase Auth Lifecycle & Sync
+  const handleUserSignedIn = useCallback(async (authUser: any) => {
+    // 1. Cloud Profile
+    const cloudProfile = await fetchSupabaseProfile(authUser.id);
+    setUserState((prev) => {
+      const merged: UserProfile = {
+        ...prev,
+        id: authUser.id,
+        isLoggedIn: true,
+        email: authUser.email || prev.email,
+        phone: authUser.phone || prev.phone,
+        name: cloudProfile?.name || authUser.user_metadata?.name || prev.name,
+        bloodGroup: cloudProfile?.bloodGroup || prev.bloodGroup,
+        emergencyNote: cloudProfile?.emergencyNote || prev.emergencyNote,
+        pin: cloudProfile?.pin || prev.pin,
+        duressPin: cloudProfile?.duressPin || prev.duressPin,
+        onboardingCompleted: true,
+      };
+      try {
+        localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(merged));
+      } catch {}
+      return merged;
+    });
+
+    // 2. Trusted Contacts
+    const cloudContacts = await fetchSupabaseContacts(authUser.id);
+    if (cloudContacts && cloudContacts.length > 0) {
+      setContacts(cloudContacts);
+      try {
+        localStorage.setItem(STORAGE_KEY_CONTACTS, JSON.stringify(cloudContacts));
+      } catch {}
+    }
+
+    // 3. Evidence Catalog
+    const cloudEvidence = await fetchSupabaseEvidence(authUser.id);
+    if (cloudEvidence && cloudEvidence.length > 0) {
+      setEvidenceList((prev) => {
+        const existingIds = new Set(prev.map((e) => e.id));
+        const newItems = cloudEvidence.filter((ce) => !existingIds.has(ce.id));
+        const merged = [...newItems, ...prev];
+        try {
+          localStorage.setItem(STORAGE_KEY_EVIDENCE, JSON.stringify(merged));
+        } catch {}
+        return merged;
+      });
+    }
+
+    // 4. Emergency Events
+    const cloudEmergencies = await fetchSupabaseEmergencyEvents(authUser.id);
+    if (cloudEmergencies && cloudEmergencies.length > 0) {
+      setEmergencyEvents((prev) => {
+        const existingIds = new Set(prev.map((e) => e.id));
+        const newItems = cloudEmergencies.filter((ce) => !existingIds.has(ce.id));
+        return [...newItems, ...prev];
+      });
+    }
+
+    // 5. Audit Events
+    const cloudAudits = await fetchSupabaseAuditEvents(authUser.id);
+    if (cloudAudits && cloudAudits.length > 0) {
+      setAuditList((prev) => {
+        const existingIds = new Set(prev.map((a) => a.id));
+        const newItems = cloudAudits.filter((ca) => !existingIds.has(ca.id));
+        const merged = [...newItems, ...prev];
+        try {
+          localStorage.setItem(STORAGE_KEY_AUDIT, JSON.stringify(merged));
+        } catch {}
+        return merged;
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!supabase) return;
+
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        setSupabaseSession(session);
+        setSupabaseUser(session.user);
+        handleUserSignedIn(session.user);
+      }
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      setSupabaseSession(session);
+      setSupabaseUser(session?.user || null);
+
+      if (event === 'SIGNED_IN' && session?.user) {
+        handleUserSignedIn(session.user);
+      } else if (event === 'SIGNED_OUT') {
+        setUserState((prev) => ({
+          ...prev,
+          isLoggedIn: false,
+          id: `guest_${Date.now().toString(36)}`,
+        }));
+      }
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, [handleUserSignedIn]);
+
+  const signOutAction = async () => {
+    await signOutSupabase();
+    setUserState((prev) => {
+      const guest: UserProfile = {
+        ...DEFAULT_USER,
+        isLoggedIn: false,
+        id: `guest_${Date.now().toString(36)}`,
+      };
+      try {
+        localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(guest));
+      } catch {}
+      return guest;
+    });
+    setContacts(DEFAULT_CONTACTS);
+    showToast('Signed out of SafeJourney account');
   };
 
   // 4. Settings
@@ -264,9 +435,10 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   });
 
   const addEvidenceRecord = useCallback((rec: Omit<EvidenceRecord, 'id' | 'timestamp'>) => {
+    const evidenceId = crypto.randomUUID();
     const newRec: EvidenceRecord = {
       ...rec,
-      id: `ev_${Date.now()}`,
+      id: evidenceId,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', month: 'short', day: 'numeric' }),
       sha256Hash: rec.sha256Hash || Array.from(crypto.getRandomValues(new Uint8Array(16)))
         .map((b) => b.toString(16).padStart(2, '0'))
@@ -280,7 +452,11 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       } catch {}
       return updated;
     });
-  }, []);
+
+    if (user.isLoggedIn && isSupabaseConfigured) {
+      saveSupabaseEvidenceMetadata(newRec, user.id).catch(() => {});
+    }
+  }, [user.id, user.isLoggedIn]);
 
   // 6. Confirmations and Audit Trail
   const [confirmationsList, setConfirmationsList] = useState<SafetyConfirmationRecord[]>([]);
@@ -383,7 +559,7 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       return null;
     }
 
-    const evidenceId = `ev_vid_${Date.now()}`;
+    const evidenceId = crypto.randomUUID();
 
     // 1. Persistent app-private storage: Store actual binary blob in IndexedDB
     await saveEvidenceBlobToDb(evidenceId, payload.videoBlob, payload.mimeType);
@@ -420,34 +596,63 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       return updated;
     });
 
+    if (user.isLoggedIn && isSupabaseConfigured) {
+      saveSupabaseEvidenceMetadata(newEvidence, user.id).catch(() => {});
+    }
+
     setEvidenceState(uploadRes.success ? 'UPLOADED' : 'SAVED_LOCALLY');
     logAudit('VIDEO_EVIDENCE_RECORDED', `Duration: ${payload.durationSeconds}s, Size: ${payload.fileSizeBytes}B, SHA-256: ${payload.sha256Hash.slice(0, 16)}...`);
-    showToast('Video evidence cryptographically sealed and saved.');
+    showToast(
+      uploadRes.success
+        ? 'Video evidence cryptographically sealed & uploaded to Cloud Vault.'
+        : 'Video evidence cryptographically sealed & saved locally.'
+    );
     return newEvidence;
   };
 
-  // Restore live Blob URLs from IndexedDB on demand or startup
+  // Restore live Blob URLs from IndexedDB on demand or from private cloud storage via signed URL
   const getOrRestoreBlobUrl = async (evidenceId: string): Promise<string | null> => {
     const rec = evidenceList.find((r) => r.id === evidenceId);
     if (rec?.videoBlobUrl) return rec.videoBlobUrl;
     if (rec?.audioBlobUrl) return rec.audioBlobUrl;
 
     const blob = await getEvidenceBlobFromDb(evidenceId);
-    if (!blob) return null;
+    if (blob) {
+      const restoredUrl = URL.createObjectURL(blob);
+      setEvidenceList((prev) =>
+        prev.map((item) =>
+          item.id === evidenceId
+            ? {
+                ...item,
+                videoBlobUrl: item.type === 'video' ? restoredUrl : item.videoBlobUrl,
+                audioBlobUrl: item.type === 'audio' ? restoredUrl : item.audioBlobUrl,
+              }
+            : item
+        )
+      );
+      return restoredUrl;
+    }
 
-    const restoredUrl = URL.createObjectURL(blob);
-    setEvidenceList((prev) =>
-      prev.map((item) =>
-        item.id === evidenceId
-          ? {
-              ...item,
-              videoBlobUrl: item.type === 'video' ? restoredUrl : item.videoBlobUrl,
-              audioBlobUrl: item.type === 'audio' ? restoredUrl : item.audioBlobUrl,
-            }
-          : item
-      )
-    );
-    return restoredUrl;
+    // Fallback: If local IndexedDB doesn't have the blob (e.g. new device/session), retrieve signed URL from private Supabase bucket
+    if (rec?.storagePath) {
+      const signedUrl = await getEvidenceSignedUrl(rec.storagePath);
+      if (signedUrl) {
+        setEvidenceList((prev) =>
+          prev.map((item) =>
+            item.id === evidenceId
+              ? {
+                  ...item,
+                  videoBlobUrl: item.type === 'video' ? signedUrl : item.videoBlobUrl,
+                  audioBlobUrl: item.type === 'audio' ? signedUrl : item.audioBlobUrl,
+                }
+              : item
+          )
+        );
+        return signedUrl;
+      }
+    }
+
+    return null;
   };
 
   // Retry uploading local evidence to Supabase Storage
@@ -518,7 +723,7 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     logAudit('EMERGENCY_SOS_ACTIVATED', reason);
 
     // Create Emergency Event Record
-    const eventId = `emg_${Date.now()}`;
+    const eventId = crypto.randomUUID();
     const mapsUrl = createMapBeaconUrl(currentLocation.lat, currentLocation.lng);
     const newEmergencyEvent: EmergencyEventRecord = {
       id: eventId,
@@ -533,13 +738,16 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       notificationAttempts: contacts.map((c) => ({
         contactId: c.id,
         contactName: c.name,
-        channel: 'WHATSAPP',
-        status: 'SENT',
+        channel: 'SMS',
+        status: 'PROVIDER_UNCONFIGURED',
         timestamp: new Date().toLocaleTimeString(),
       })),
     };
     setEmergencyEvents((prev) => [newEmergencyEvent, ...prev]);
     broadcastEmergencyToSupabase(newEmergencyEvent);
+    if (user.isLoggedIn && isSupabaseConfigured) {
+      saveSupabaseNotificationAttempts(eventId, contacts).catch(() => {});
+    }
 
     // Add Beacon to evidence catalog
     addEvidenceRecord({
@@ -681,6 +889,11 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       };
     });
 
+    // Sync live breadcrumb GPS location to Supabase
+    if (user.isLoggedIn && isSupabaseConfigured && activeJourney?.id) {
+      saveSupabaseLocationPing(activeJourney.id, user.id, reading, shortestDistance).catch(() => {});
+    }
+
     // Check trigger conditions
     if (stopCheck.isStopped && !isDeviationAlertActive && !isSosActive) {
       setDeviationReason(`Unexplained Vehicle Stop: Stationary for ${Math.round(stopCheck.stoppedDurationSeconds / 60)} minutes.`);
@@ -699,7 +912,7 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       soundManager.playBeep(920, 0.3);
       logAudit('DEVIATION_TRIGGERED', `Deviated ${shortestDistance}m from expected route`);
     }
-  }, [activeJourney, settings, isDeviationAlertActive, isSosActive, logAudit]);
+  }, [activeJourney, settings, isDeviationAlertActive, isSosActive, logAudit, user.id, user.isLoggedIn]);
 
   // Start Journey
   const startJourney = async (
@@ -715,9 +928,10 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
     const now = new Date();
     const arrivalTime = new Date(now.getTime() + 20 * 60000);
+    const journeyId = crypto.randomUUID();
 
     const newJourney: ActiveJourney = {
-      id: `jny_${Date.now()}`,
+      id: journeyId,
       destination,
       origin: 'Current Location',
       originCoords: originPos,
@@ -747,11 +961,19 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setActiveTab('journey');
     logAudit('JOURNEY_STARTED', `Destination: ${destination}, Transport: ${transportMode}`);
 
+    if (user.isLoggedIn && isSupabaseConfigured) {
+      saveSupabaseJourney(newJourney, user.id).catch(() => {});
+      saveSupabaseRoutePoints(journeyId, plannedRoute).catch(() => {});
+    }
+
     showToast(`Journey to ${destination} initiated. Autonomous Guard active.`);
   };
 
   const endJourney = () => {
     if (activeJourney) {
+      if (user.isLoggedIn && isSupabaseConfigured) {
+        updateSupabaseJourneyStatus(activeJourney.id, 'COMPLETED').catch(() => {});
+      }
       logAudit('JOURNEY_COMPLETED', `Safe arrival at ${activeJourney.destination}`);
       addEvidenceRecord({
         type: 'location_beacon',
@@ -807,13 +1029,17 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       logAudit('DURESS_PIN_ENTERED', 'Covert emergency signal triggered');
 
       const confRecord: SafetyConfirmationRecord = {
-        id: `conf_${Date.now()}`,
+        id: crypto.randomUUID(),
         journeyId: activeJourney?.id,
         confirmationType: actionType === 'SAFE' ? 'SAFE_CONFIRMED' : 'JOURNEY_DEACTIVATED',
-        timestamp: new Date().toLocaleTimeString(),
+        timestamp: new Date().toISOString(),
         isDuress: true,
       };
       setConfirmationsList((prev) => [confRecord, ...prev]);
+
+      if (user.isLoggedIn && isSupabaseConfigured) {
+        saveSupabaseSafetyConfirmation(confRecord, user.id).catch(() => {});
+      }
 
       showToast('Safety check confirmed.');
       setTimeout(() => {
@@ -844,13 +1070,17 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       }
 
       const confRecord: SafetyConfirmationRecord = {
-        id: `conf_${Date.now()}`,
+        id: crypto.randomUUID(),
         journeyId: activeJourney?.id,
         confirmationType: actionType === 'SAFE' ? 'SAFE_CONFIRMED' : 'JOURNEY_DEACTIVATED',
-        timestamp: new Date().toLocaleTimeString(),
+        timestamp: new Date().toISOString(),
         isDuress: false,
       };
       setConfirmationsList((prev) => [confRecord, ...prev]);
+
+      if (user.isLoggedIn && isSupabaseConfigured) {
+        saveSupabaseSafetyConfirmation(confRecord, user.id).catch(() => {});
+      }
 
       return { success: true, message: 'Verified', isDuress: false };
     }
@@ -985,6 +1215,11 @@ export const SafetyProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         deleteContact,
         settings,
         updateSettings,
+        supabaseUser,
+        supabaseSession,
+        signOutAction,
+        showAuthModal,
+        setShowAuthModal,
         activeJourney,
         journeyState,
         startJourney,

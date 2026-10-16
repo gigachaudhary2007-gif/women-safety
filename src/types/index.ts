@@ -175,7 +175,7 @@ export interface EmergencyEventRecord {
     contactId: string;
     contactName: string;
     channel: 'SMS' | 'WHATSAPP' | 'SYSTEM';
-    status: 'PENDING' | 'SENT' | 'DELIVERED' | 'FAILED';
+    status: 'PENDING' | 'SENT' | 'DELIVERED' | 'FAILED' | 'PROVIDER_UNCONFIGURED';
     timestamp: string;
   }[];
 }

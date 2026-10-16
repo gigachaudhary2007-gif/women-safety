@@ -163,6 +163,24 @@ export const ContactsScreen: React.FC = () => {
 
       {/* Grid of Contacts: 1 on mobile, 2 on md, 3 on lg/xl */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {contacts.length === 0 && (
+          <div className="col-span-full text-center py-12 px-6 glass-panel rounded-[32px] border border-dashed border-slate-300 dark:border-indigo-900/60 flex flex-col items-center justify-center space-y-3">
+            <div className="w-14 h-14 rounded-2xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center">
+              <Users className="w-7 h-7" />
+            </div>
+            <h3 className="text-base font-black text-slate-900 dark:text-white">No Trusted Contacts Added Yet</h3>
+            <p className="text-xs font-bold text-slate-700 dark:text-slate-300 max-w-sm">
+              Add trusted family members or friends. They will receive automated GPS tracking alerts and emergency SOS beacons.
+            </p>
+            <button
+              onClick={openAddModal}
+              className="mt-2 h-10 px-5 rounded-2xl bg-indigo-600 text-white text-xs font-black flex items-center gap-2 hover:bg-indigo-700 active:scale-95 transition shadow-sm cursor-pointer"
+            >
+              <UserPlus className="w-4 h-4" />
+              <span>Add First Contact</span>
+            </button>
+          </div>
+        )}
         {contacts.map((contact) => (
           <div
             key={contact.id}

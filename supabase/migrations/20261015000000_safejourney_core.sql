@@ -1,18 +1,24 @@
 -- ==============================================================================
--- SAFEJOURNEY CORE DATABASE SCHEMA & ROW LEVEL SECURITY (RLS) POLICIES
--- PostgreSQL + Supabase Authentication & Private Storage Configuration
+-- SAFEJOURNEY (JOURNEY GUARD) COMPLETE PRODUCTION DATABASE MIGRATION
+-- Robust, Idempotent (Re-runnable without duplicate policy errors), 
+-- Strict Row Level Security (RLS) & Private Evidence Vault Configuration.
 -- ==============================================================================
 
--- 1. PROFILES TABLE
+-- Enable UUID extension if not already enabled
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- ==============================================================================
+-- 1. PUBLIC PROFILES TABLE
+-- ==============================================================================
 CREATE TABLE IF NOT EXISTS public.profiles (
     id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
-    name TEXT NOT NULL,
-    email TEXT NOT NULL,
-    phone TEXT NOT NULL,
-    blood_group TEXT,
-    emergency_note TEXT,
-    pin_hash TEXT NOT NULL,
-    duress_pin_hash TEXT,
+    name TEXT NOT NULL DEFAULT '',
+    email TEXT DEFAULT '',
+    phone TEXT DEFAULT '',
+    blood_group TEXT DEFAULT 'B+',
+    emergency_note TEXT DEFAULT '',
+    pin_hash TEXT NOT NULL DEFAULT '1234',
+    duress_pin_hash TEXT DEFAULT '9999',
     theme TEXT DEFAULT 'light',
     device_view TEXT DEFAULT 'web',
     onboarding_completed BOOLEAN DEFAULT true,
@@ -20,13 +26,65 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Automatic Profile Provisioning Trigger (Runs on Email Signup or Phone OTP Login)
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS trigger AS $$
+BEGIN
+  INSERT INTO public.profiles (
+    id,
+    name,
+    email,
+    phone,
+    blood_group,
+    pin_hash,
+    duress_pin_hash,
+    theme,
+    device_view,
+    onboarding_completed,
+    created_at,
+    updated_at
+  )
+  VALUES (
+    NEW.id,
+    COALESCE(
+      NEW.raw_user_meta_data->>'name',
+      split_part(COALESCE(NEW.email, ''), '@', 1),
+      'Journey Guard User'
+    ),
+    COALESCE(NEW.email, ''),
+    COALESCE(NEW.phone, ''),
+    'B+',
+    '1234',
+    '9999',
+    'light',
+    'web',
+    true,
+    NOW(),
+    NOW()
+  )
+  ON CONFLICT (id) DO UPDATE
+  SET
+    email = CASE WHEN EXCLUDED.email <> '' THEN EXCLUDED.email ELSE public.profiles.email END,
+    phone = CASE WHEN EXCLUDED.phone <> '' THEN EXCLUDED.phone ELSE public.profiles.phone END,
+    updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+-- ==============================================================================
 -- 2. TRUSTED CONTACTS TABLE
+-- ==============================================================================
 CREATE TABLE IF NOT EXISTS public.trusted_contacts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     phone TEXT NOT NULL,
-    relationship TEXT NOT NULL,
+    relationship TEXT NOT NULL DEFAULT 'Other',
     is_primary BOOLEAN DEFAULT false,
     notify_on_journey_start BOOLEAN DEFAULT true,
     notify_on_deviation BOOLEAN DEFAULT true,
@@ -34,10 +92,12 @@ CREATE TABLE IF NOT EXISTS public.trusted_contacts (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- ==============================================================================
 -- 3. JOURNEYS TABLE
+-- ==============================================================================
 CREATE TABLE IF NOT EXISTS public.journeys (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
     origin_name TEXT NOT NULL,
     destination_name TEXT NOT NULL,
     origin_lat DOUBLE PRECISION NOT NULL,
@@ -48,13 +108,15 @@ CREATE TABLE IF NOT EXISTS public.journeys (
     status TEXT NOT NULL DEFAULT 'JOURNEY_ACTIVE',
     started_at TIMESTAMPTZ DEFAULT NOW(),
     ended_at TIMESTAMPTZ,
-    distance_km DOUBLE PRECISION,
+    distance_km DOUBLE PRECISION DEFAULT 0,
     deviation_threshold_meters INTEGER DEFAULT 500,
     stop_timeout_seconds INTEGER DEFAULT 300,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 4. JOURNEY ROUTE POINTS (Expected Route Geometry)
+-- ==============================================================================
+-- 4. JOURNEY ROUTE POINTS (Expected Corridors)
+-- ==============================================================================
 CREATE TABLE IF NOT EXISTS public.journey_route_points (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     journey_id UUID NOT NULL REFERENCES public.journeys(id) ON DELETE CASCADE,
@@ -64,11 +126,13 @@ CREATE TABLE IF NOT EXISTS public.journey_route_points (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 5. JOURNEY LOCATIONS (Live Permitted GPS Tracking Updates)
+-- ==============================================================================
+-- 5. JOURNEY LOCATIONS (Live Breadcrumb GPS Pings)
+-- ==============================================================================
 CREATE TABLE IF NOT EXISTS public.journey_locations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     journey_id UUID NOT NULL REFERENCES public.journeys(id) ON DELETE CASCADE,
-    user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
     lat DOUBLE PRECISION NOT NULL,
     lng DOUBLE PRECISION NOT NULL,
     accuracy DOUBLE PRECISION NOT NULL,
@@ -77,25 +141,29 @@ CREATE TABLE IF NOT EXISTS public.journey_locations (
     recorded_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 6. EMERGENCY EVENTS TABLE
+-- ==============================================================================
+-- 6. EMERGENCY EVENTS TABLE (Distress & Beacon Broadcasts)
+-- ==============================================================================
 CREATE TABLE IF NOT EXISTS public.emergency_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
     journey_id UUID REFERENCES public.journeys(id) ON DELETE SET NULL,
     trigger_reason TEXT NOT NULL,
     lat DOUBLE PRECISION NOT NULL,
     lng DOUBLE PRECISION NOT NULL,
-    accuracy DOUBLE PRECISION NOT NULL,
+    accuracy DOUBLE PRECISION NOT NULL DEFAULT 10,
     google_maps_url TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'BROADCASTING',
     resolved_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 7. EVIDENCE METADATA TABLE (Video & Audio Recording Catalog)
+-- ==============================================================================
+-- 7. EVIDENCE METADATA TABLE (Video & Audio Catalog)
+-- ==============================================================================
 CREATE TABLE IF NOT EXISTS public.evidence_metadata (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
     journey_id UUID REFERENCES public.journeys(id) ON DELETE SET NULL,
     emergency_event_id UUID REFERENCES public.emergency_events(id) ON DELETE SET NULL,
     evidence_type TEXT NOT NULL, -- 'video', 'audio', 'incident_report'
@@ -114,39 +182,57 @@ CREATE TABLE IF NOT EXISTS public.evidence_metadata (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- ==============================================================================
 -- 8. NOTIFICATION ATTEMPTS TABLE (SMS / WhatsApp Dispatch Logs)
+-- Real delivery status; marked as PROVIDER_UNCONFIGURED unless real backend provider is wired
+-- ==============================================================================
 CREATE TABLE IF NOT EXISTS public.notification_attempts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     emergency_event_id UUID NOT NULL REFERENCES public.emergency_events(id) ON DELETE CASCADE,
     contact_id UUID REFERENCES public.trusted_contacts(id) ON DELETE SET NULL,
     contact_phone TEXT NOT NULL,
     channel TEXT NOT NULL, -- 'SMS', 'WHATSAPP'
-    provider TEXT NOT NULL DEFAULT 'Twilio/Simulated',
-    status TEXT NOT NULL, -- 'SENT', 'DELIVERED', 'FAILED'
+    provider TEXT NOT NULL DEFAULT 'Unconfigured Provider',
+    status TEXT NOT NULL DEFAULT 'PROVIDER_UNCONFIGURED', -- 'QUEUED', 'SENT', 'DELIVERED', 'FAILED', 'PROVIDER_UNCONFIGURED'
     attempt_count INTEGER DEFAULT 1,
     provider_response TEXT,
     sent_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 9. SAFETY CONFIRMATIONS TABLE
+-- ==============================================================================
+-- 9. SAFETY CONFIRMATIONS TABLE (Duress & Safe PIN Audit)
+-- ==============================================================================
 CREATE TABLE IF NOT EXISTS public.safety_confirmations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
     journey_id UUID REFERENCES public.journeys(id) ON DELETE SET NULL,
     confirmation_type TEXT NOT NULL, -- 'SAFE_CONFIRMED', 'JOURNEY_DEACTIVATED'
     is_duress BOOLEAN DEFAULT false,
     confirmed_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 10. EVIDENCE DELETION AUDIT TABLE
+-- ==============================================================================
+-- 10. EVIDENCE DELETION AUDIT TABLE (Tamper-Resistant Security Trail)
+-- ==============================================================================
 CREATE TABLE IF NOT EXISTS public.evidence_deletion_audit (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-    evidence_id UUID NOT NULL,
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    evidence_id UUID,
     status TEXT NOT NULL, -- 'SUCCESS', 'FAILED_AUTH', 'BLOCKED_ACTIVE_EMERGENCY'
     reason TEXT,
     client_ip TEXT,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    timestamp TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ==============================================================================
+-- 11. AUDIT EVENTS TABLE
+-- ==============================================================================
+CREATE TABLE IF NOT EXISTS public.audit_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+    event_type TEXT NOT NULL,
+    details TEXT,
+    timestamp TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- ==============================================================================
@@ -154,14 +240,20 @@ CREATE TABLE IF NOT EXISTS public.evidence_deletion_audit (
 -- ==============================================================================
 CREATE INDEX IF NOT EXISTS idx_trusted_contacts_user ON public.trusted_contacts(user_id);
 CREATE INDEX IF NOT EXISTS idx_journeys_user ON public.journeys(user_id);
+CREATE INDEX IF NOT EXISTS idx_journey_route_points_journey ON public.journey_route_points(journey_id);
 CREATE INDEX IF NOT EXISTS idx_journey_locations_journey ON public.journey_locations(journey_id);
+CREATE INDEX IF NOT EXISTS idx_journey_locations_user ON public.journey_locations(user_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_metadata_user ON public.evidence_metadata(user_id);
 CREATE INDEX IF NOT EXISTS idx_emergency_events_user ON public.emergency_events(user_id);
+CREATE INDEX IF NOT EXISTS idx_notification_attempts_emergency ON public.notification_attempts(emergency_event_id);
+CREATE INDEX IF NOT EXISTS idx_safety_confirmations_user ON public.safety_confirmations(user_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_deletion_audit_user ON public.evidence_deletion_audit(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_events_user ON public.audit_events(user_id);
 
 -- ==============================================================================
 -- ROW LEVEL SECURITY (RLS) POLICIES
--- Enforces personal data isolation so users can never read/alter another user's records
+-- Strict Isolation: Authenticated users can only read & modify their own records.
+-- Drop existing policies first to guarantee safe re-runnability without errors.
 -- ==============================================================================
 
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
@@ -174,51 +266,218 @@ ALTER TABLE public.evidence_metadata ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.notification_attempts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.safety_confirmations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.evidence_deletion_audit ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.audit_events ENABLE ROW LEVEL SECURITY;
 
--- Profiles: Users manage only their own profile
-CREATE POLICY "Users view own profile" ON public.profiles FOR SELECT USING (auth.uid() = id);
-CREATE POLICY "Users update own profile" ON public.profiles FOR UPDATE USING (auth.uid() = id);
+-- 1. Profiles Policies
+DROP POLICY IF EXISTS "Users can view own profile" ON public.profiles;
+CREATE POLICY "Users can view own profile" ON public.profiles
+    FOR SELECT TO authenticated USING (auth.uid() = id);
 
--- Trusted Contacts: Users manage only their own contacts
-CREATE POLICY "Users view own contacts" ON public.trusted_contacts FOR SELECT USING (auth.uid() = user_id);
-CREATE POLICY "Users insert own contacts" ON public.trusted_contacts FOR INSERT WITH CHECK (auth.uid() = user_id);
-CREATE POLICY "Users update own contacts" ON public.trusted_contacts FOR UPDATE USING (auth.uid() = user_id);
-CREATE POLICY "Users delete own contacts" ON public.trusted_contacts FOR DELETE USING (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users can insert own profile" ON public.profiles;
+CREATE POLICY "Users can insert own profile" ON public.profiles
+    FOR INSERT TO authenticated WITH CHECK (auth.uid() = id);
 
--- Journeys: User personal journeys
-CREATE POLICY "Users view own journeys" ON public.journeys FOR SELECT USING (auth.uid() = user_id);
-CREATE POLICY "Users insert own journeys" ON public.journeys FOR INSERT WITH CHECK (auth.uid() = user_id);
-CREATE POLICY "Users update own journeys" ON public.journeys FOR UPDATE USING (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users can update own profile" ON public.profiles;
+CREATE POLICY "Users can update own profile" ON public.profiles
+    FOR UPDATE TO authenticated USING (auth.uid() = id);
 
--- Evidence Metadata: User owns their recordings
-CREATE POLICY "Users view own evidence" ON public.evidence_metadata FOR SELECT USING (auth.uid() = user_id);
-CREATE POLICY "Users insert own evidence" ON public.evidence_metadata FOR INSERT WITH CHECK (auth.uid() = user_id);
-CREATE POLICY "Users delete own evidence" ON public.evidence_metadata FOR DELETE USING (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users can delete own profile" ON public.profiles;
+CREATE POLICY "Users can delete own profile" ON public.profiles
+    FOR DELETE TO authenticated USING (auth.uid() = id);
 
--- Deletion Audit: User can only view their own deletion audit logs
-CREATE POLICY "Users view own deletion audit" ON public.evidence_deletion_audit FOR SELECT USING (auth.uid() = user_id);
-CREATE POLICY "Users insert deletion audit" ON public.evidence_deletion_audit FOR INSERT WITH CHECK (auth.uid() = user_id);
+-- 2. Trusted Contacts Policies
+DROP POLICY IF EXISTS "Users can view own contacts" ON public.trusted_contacts;
+CREATE POLICY "Users can view own contacts" ON public.trusted_contacts
+    FOR SELECT TO authenticated USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users can insert own contacts" ON public.trusted_contacts;
+CREATE POLICY "Users can insert own contacts" ON public.trusted_contacts
+    FOR INSERT TO authenticated WITH CHECK (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users can update own contacts" ON public.trusted_contacts;
+CREATE POLICY "Users can update own contacts" ON public.trusted_contacts
+    FOR UPDATE TO authenticated USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users can delete own contacts" ON public.trusted_contacts;
+CREATE POLICY "Users can delete own contacts" ON public.trusted_contacts
+    FOR DELETE TO authenticated USING (auth.uid() = user_id);
+
+-- 3. Journeys Policies
+DROP POLICY IF EXISTS "Users can view own journeys" ON public.journeys;
+CREATE POLICY "Users can view own journeys" ON public.journeys
+    FOR SELECT TO authenticated USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users can insert own journeys" ON public.journeys;
+CREATE POLICY "Users can insert own journeys" ON public.journeys
+    FOR INSERT TO authenticated WITH CHECK (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users can update own journeys" ON public.journeys;
+CREATE POLICY "Users can update own journeys" ON public.journeys
+    FOR UPDATE TO authenticated USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users can delete own journeys" ON public.journeys;
+CREATE POLICY "Users can delete own journeys" ON public.journeys
+    FOR DELETE TO authenticated USING (auth.uid() = user_id);
+
+-- 4. Journey Route Points Policies (Linked through journey ownership)
+DROP POLICY IF EXISTS "Users can view own journey route points" ON public.journey_route_points;
+CREATE POLICY "Users can view own journey route points" ON public.journey_route_points
+    FOR SELECT TO authenticated USING (
+        EXISTS (
+            SELECT 1 FROM public.journeys
+            WHERE journeys.id = journey_route_points.journey_id
+            AND journeys.user_id = auth.uid()
+        )
+    );
+
+DROP POLICY IF EXISTS "Users can insert own journey route points" ON public.journey_route_points;
+CREATE POLICY "Users can insert own journey route points" ON public.journey_route_points
+    FOR INSERT TO authenticated WITH CHECK (
+        EXISTS (
+            SELECT 1 FROM public.journeys
+            WHERE journeys.id = journey_route_points.journey_id
+            AND journeys.user_id = auth.uid()
+        )
+    );
+
+DROP POLICY IF EXISTS "Users can delete own journey route points" ON public.journey_route_points;
+CREATE POLICY "Users can delete own journey route points" ON public.journey_route_points
+    FOR DELETE TO authenticated USING (
+        EXISTS (
+            SELECT 1 FROM public.journeys
+            WHERE journeys.id = journey_route_points.journey_id
+            AND journeys.user_id = auth.uid()
+        )
+    );
+
+-- 5. Journey Locations Policies
+DROP POLICY IF EXISTS "Users can view own journey locations" ON public.journey_locations;
+CREATE POLICY "Users can view own journey locations" ON public.journey_locations
+    FOR SELECT TO authenticated USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users can insert own journey locations" ON public.journey_locations;
+CREATE POLICY "Users can insert own journey locations" ON public.journey_locations
+    FOR INSERT TO authenticated WITH CHECK (auth.uid() = user_id);
+
+-- 6. Emergency Events Policies
+DROP POLICY IF EXISTS "Users can view own emergency events" ON public.emergency_events;
+CREATE POLICY "Users can view own emergency events" ON public.emergency_events
+    FOR SELECT TO authenticated USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users can insert own emergency events" ON public.emergency_events;
+CREATE POLICY "Users can insert own emergency events" ON public.emergency_events
+    FOR INSERT TO authenticated WITH CHECK (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users can update own emergency events" ON public.emergency_events;
+CREATE POLICY "Users can update own emergency events" ON public.emergency_events
+    FOR UPDATE TO authenticated USING (auth.uid() = user_id);
+
+-- 7. Notification Attempts Policies (Linked through emergency event ownership)
+DROP POLICY IF EXISTS "Users can view own notification attempts" ON public.notification_attempts;
+CREATE POLICY "Users can view own notification attempts" ON public.notification_attempts
+    FOR SELECT TO authenticated USING (
+        EXISTS (
+            SELECT 1 FROM public.emergency_events
+            WHERE emergency_events.id = notification_attempts.emergency_event_id
+            AND emergency_events.user_id = auth.uid()
+        )
+    );
+
+DROP POLICY IF EXISTS "Users can insert own notification attempts" ON public.notification_attempts;
+CREATE POLICY "Users can insert own notification attempts" ON public.notification_attempts
+    FOR INSERT TO authenticated WITH CHECK (
+        EXISTS (
+            SELECT 1 FROM public.emergency_events
+            WHERE emergency_events.id = notification_attempts.emergency_event_id
+            AND emergency_events.user_id = auth.uid()
+        )
+    );
+
+-- 8. Safety Confirmations Policies
+DROP POLICY IF EXISTS "Users can view own safety confirmations" ON public.safety_confirmations;
+CREATE POLICY "Users can view own safety confirmations" ON public.safety_confirmations
+    FOR SELECT TO authenticated USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users can insert own safety confirmations" ON public.safety_confirmations;
+CREATE POLICY "Users can insert own safety confirmations" ON public.safety_confirmations
+    FOR INSERT TO authenticated WITH CHECK (auth.uid() = user_id);
+
+-- 9. Evidence Metadata Policies
+DROP POLICY IF EXISTS "Users can view own evidence metadata" ON public.evidence_metadata;
+CREATE POLICY "Users can view own evidence metadata" ON public.evidence_metadata
+    FOR SELECT TO authenticated USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users can insert own evidence metadata" ON public.evidence_metadata;
+CREATE POLICY "Users can insert own evidence metadata" ON public.evidence_metadata
+    FOR INSERT TO authenticated WITH CHECK (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users can update own evidence metadata" ON public.evidence_metadata;
+CREATE POLICY "Users can update own evidence metadata" ON public.evidence_metadata
+    FOR UPDATE TO authenticated USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users can delete own evidence metadata" ON public.evidence_metadata;
+CREATE POLICY "Users can delete own evidence metadata" ON public.evidence_metadata
+    FOR DELETE TO authenticated USING (auth.uid() = user_id);
+
+-- 10. Evidence Deletion Audit Policies
+DROP POLICY IF EXISTS "Users can view own deletion audit" ON public.evidence_deletion_audit;
+CREATE POLICY "Users can view own deletion audit" ON public.evidence_deletion_audit
+    FOR SELECT TO authenticated USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users can insert own deletion audit" ON public.evidence_deletion_audit;
+CREATE POLICY "Users can insert own deletion audit" ON public.evidence_deletion_audit
+    FOR INSERT TO authenticated WITH CHECK (auth.uid() = user_id);
+
+-- 11. Audit Events Policies
+DROP POLICY IF EXISTS "Users can view own audit events" ON public.audit_events;
+CREATE POLICY "Users can view own audit events" ON public.audit_events
+    FOR SELECT TO authenticated USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users can insert own audit events" ON public.audit_events;
+CREATE POLICY "Users can insert own audit events" ON public.audit_events
+    FOR INSERT TO authenticated WITH CHECK (auth.uid() = user_id OR user_id IS NULL);
 
 -- ==============================================================================
--- STORAGE BUCKET CONFIGURATION FOR PRIVATE EVIDENCE
+-- 12. STORAGE BUCKET CONFIGURATION FOR PRIVATE EVIDENCE VAULT
+-- Encrypted Video/Audio Recordings stored under: {auth.uid()}/{fileName}
 -- ==============================================================================
--- Insert private storage bucket for encrypted videos
 INSERT INTO storage.buckets (id, name, public) 
 VALUES ('evidence-vault', 'evidence-vault', false)
 ON CONFLICT (id) DO NOTHING;
 
--- Storage RLS: Authenticated users can upload and read their own folder objects
-CREATE POLICY "Authenticated users upload evidence"
+-- Storage RLS Policies (Folder isolation enforced: storage.foldername(name)[1] == auth.uid()::text)
+DROP POLICY IF EXISTS "Authenticated users upload evidence recordings" ON storage.objects;
+CREATE POLICY "Authenticated users upload evidence recordings"
 ON storage.objects FOR INSERT
 TO authenticated
-WITH CHECK (bucket_id = 'evidence-vault' AND auth.uid()::text = (storage.foldername(name))[1]);
+WITH CHECK (
+    bucket_id = 'evidence-vault' 
+    AND (storage.foldername(name))[1] = auth.uid()::text
+);
 
+DROP POLICY IF EXISTS "Users read own evidence recordings" ON storage.objects;
 CREATE POLICY "Users read own evidence recordings"
 ON storage.objects FOR SELECT
 TO authenticated
-USING (bucket_id = 'evidence-vault' AND auth.uid()::text = (storage.foldername(name))[1]);
+USING (
+    bucket_id = 'evidence-vault' 
+    AND (storage.foldername(name))[1] = auth.uid()::text
+);
 
+DROP POLICY IF EXISTS "Users update own evidence recordings" ON storage.objects;
+CREATE POLICY "Users update own evidence recordings"
+ON storage.objects FOR UPDATE
+TO authenticated
+USING (
+    bucket_id = 'evidence-vault' 
+    AND (storage.foldername(name))[1] = auth.uid()::text
+);
+
+DROP POLICY IF EXISTS "Users delete own evidence recordings" ON storage.objects;
 CREATE POLICY "Users delete own evidence recordings"
 ON storage.objects FOR DELETE
 TO authenticated
-USING (bucket_id = 'evidence-vault' AND auth.uid()::text = (storage.foldername(name))[1]);
+USING (
+    bucket_id = 'evidence-vault' 
+    AND (storage.foldername(name))[1] = auth.uid()::text
+);

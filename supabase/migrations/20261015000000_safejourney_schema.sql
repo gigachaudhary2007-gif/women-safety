@@ -1,0 +1,3 @@
+-- SafeJourney Core Schema is maintained in:
+-- supabase/migrations/20261015000000_safejourney_core.sql
+-- Please execute 20261015000000_safejourney_core.sql in your Supabase SQL Editor.

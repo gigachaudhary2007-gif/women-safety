@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   User,
   Shield,
@@ -14,9 +14,144 @@ import {
   Moon,
   Monitor,
   Smartphone,
+  Database,
+  RefreshCw,
+  CheckCircle,
+  AlertTriangle,
+  ExternalLink,
+  LogIn,
+  LogOut,
+  Mail,
+  Phone,
 } from 'lucide-react';
 import { useSafety } from '../../context/SafetyContext';
 import { soundManager } from '../../utils/audio';
+import { checkSupabaseHealth, isSupabaseConfigured, getCleanSupabaseUrl } from '../../lib/supabase';
+
+const SupabaseStatusCard: React.FC = () => {
+  const [checking, setChecking] = useState<boolean>(false);
+  const [health, setHealth] = useState<{
+    configured: boolean;
+    url: string;
+    reachable: boolean;
+    statusText: string;
+    tables: Record<string, boolean>;
+  } | null>(null);
+
+  const runCheck = async () => {
+    setChecking(true);
+    try {
+      const res = await checkSupabaseHealth();
+      setHealth(res);
+    } catch {
+      setHealth({
+        configured: isSupabaseConfigured,
+        url: getCleanSupabaseUrl(),
+        reachable: false,
+        statusText: 'Could not reach server',
+        tables: {},
+      });
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  useEffect(() => {
+    runCheck();
+  }, []);
+
+  const cleanUrl = getCleanSupabaseUrl();
+  const allTablesOk = health?.tables && Object.keys(health.tables).length > 0 && Object.values(health.tables).every(Boolean);
+  const anyTableMissing = health?.tables && Object.values(health.tables).some((v) => !v);
+
+  return (
+    <div className="glass-panel rounded-[32px] p-6 lg:p-7 shadow-sm border border-slate-200 dark:border-indigo-900/50 space-y-4">
+      <div className="flex items-center justify-between pb-2 border-b border-slate-200 dark:border-indigo-900/40">
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 rounded-xl bg-emerald-500/10 dark:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 flex items-center justify-center">
+            <Database className="w-4 h-4" />
+          </div>
+          <div>
+            <h3 className="text-sm font-black text-slate-900 dark:text-white">
+              Supabase Cloud Connection
+            </h3>
+            <span className="text-[11px] font-bold text-slate-500 dark:text-slate-400">
+              Live status & schema validation
+            </span>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={runCheck}
+          disabled={checking}
+          className="h-8 px-3 rounded-xl glass-panel text-xs font-black flex items-center gap-1.5 hover:bg-slate-100 dark:hover:bg-slate-800 transition active:scale-95 disabled:opacity-50 cursor-pointer"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 text-indigo-600 ${checking ? 'animate-spin' : ''}`} />
+          <span>{checking ? 'Checking...' : 'Check'}</span>
+        </button>
+      </div>
+
+      <div className="space-y-3">
+        {/* Status indicator row */}
+        <div className="flex items-center justify-between p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-indigo-900/30">
+          <span className="text-xs font-bold text-slate-600 dark:text-slate-300">
+            Project Endpoint
+          </span>
+          <span className="text-xs font-mono font-bold text-indigo-600 dark:text-indigo-400 truncate max-w-[200px]">
+            {cleanUrl || 'Not configured'}
+          </span>
+        </div>
+
+        <div className="flex items-center justify-between p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-indigo-900/30">
+          <span className="text-xs font-bold text-slate-600 dark:text-slate-300">
+            Connection State
+          </span>
+          <div className="flex items-center gap-1.5">
+            {health?.reachable ? (
+              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-black bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800">
+                <CheckCircle className="w-3 h-3" />
+                <span>Reachable</span>
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-black bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-800">
+                <AlertTriangle className="w-3 h-3" />
+                <span>Offline / Local Only</span>
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Database Tables Verification */}
+        {health?.tables && Object.keys(health.tables).length > 0 && (
+          <div className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-indigo-900/30 space-y-2">
+            <span className="text-xs font-bold text-slate-600 dark:text-slate-300 block">
+              Schema Tables (Postgres Cache)
+            </span>
+            <div className="grid grid-cols-2 gap-1.5">
+              {Object.entries(health.tables).map(([tbl, ok]) => (
+                <div key={tbl} className="flex items-center justify-between px-2.5 py-1 rounded-xl bg-white dark:bg-slate-900 text-[11px] border border-slate-200 dark:border-indigo-900/30">
+                  <span className="font-mono text-slate-700 dark:text-slate-300">{tbl}</span>
+                  {ok ? (
+                    <span className="text-emerald-600 dark:text-emerald-400 font-black">✓ OK</span>
+                  ) : (
+                    <span className="text-amber-600 dark:text-amber-400 font-black">Missing</span>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {anyTableMissing && (
+              <div className="mt-2 p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-800 dark:text-amber-300 text-[11px] leading-relaxed">
+                <strong>Table setup needed:</strong> Run the migration SQL in your Supabase SQL Editor (`supabase/migrations/20261015000000_safejourney_core.sql`) so these tables exist.
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
 
 export const ProfileSettingsScreen: React.FC = () => {
   const {
@@ -30,6 +165,8 @@ export const ProfileSettingsScreen: React.FC = () => {
     setTheme,
     deviceView,
     setDeviceView,
+    setShowAuthModal,
+    signOutAction,
   } = useSafety();
 
   const [name, setName] = useState<string>(user.name);
@@ -40,6 +177,16 @@ export const ProfileSettingsScreen: React.FC = () => {
   const [duressPin, setDuressPin] = useState<string>(user.duressPin || '9999');
   const [showPin, setShowPin] = useState<boolean>(false);
   const [savedSuccess, setSavedSuccess] = useState<boolean>(false);
+
+  // Synchronize local form inputs when cloud user signs in
+  useEffect(() => {
+    setName(user.name);
+    setPhone(user.phone);
+    if (user.bloodGroup) setBloodGroup(user.bloodGroup);
+    if (user.emergencyNote) setEmergencyNote(user.emergencyNote);
+    if (user.pin) setPin(user.pin);
+    if (user.duressPin) setDuressPin(user.duressPin);
+  }, [user]);
 
   const handleSaveProfile = (e: React.FormEvent) => {
     e.preventDefault();
@@ -87,6 +234,67 @@ export const ProfileSettingsScreen: React.FC = () => {
         </div>
       </div>
 
+      {/* Cloud Authentication Session Banner */}
+      <div className="glass-panel-elevated rounded-[28px] p-5 shadow-sm border border-indigo-200 dark:border-indigo-900/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+        <div className="flex items-center gap-3.5">
+          <div className="w-11 h-11 rounded-2xl bg-indigo-600/10 dark:bg-indigo-500/20 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
+            <Lock className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-black uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                Supabase Identity
+              </span>
+              <span
+                className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full ${
+                  user.isLoggedIn
+                    ? 'bg-emerald-500/20 text-emerald-800 dark:text-emerald-300 border border-emerald-500/30'
+                    : 'bg-amber-500/20 text-amber-800 dark:text-amber-300 border border-amber-500/30'
+                }`}
+              >
+                {user.isLoggedIn ? 'Authenticated' : 'Local Offline / Guest'}
+              </span>
+            </div>
+            <p className="text-sm font-black text-slate-900 dark:text-white mt-0.5">
+              {user.isLoggedIn
+                ? user.email || user.phone || 'Cloud Account Connected'
+                : 'Not signed in to Supabase'}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 self-end sm:self-auto">
+          {user.isLoggedIn ? (
+            <>
+              <button
+                type="button"
+                onClick={() => setShowAuthModal(true)}
+                className="h-9 px-3.5 rounded-xl glass-panel text-xs font-black text-slate-700 dark:text-slate-300 hover:text-indigo-600 transition cursor-pointer"
+              >
+                Switch Account
+              </button>
+              <button
+                type="button"
+                onClick={signOutAction}
+                className="h-9 px-3.5 rounded-xl bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400 text-xs font-black flex items-center gap-1.5 hover:bg-red-100 transition cursor-pointer"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>Log Out</span>
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setShowAuthModal(true)}
+              className="h-9 px-4 rounded-xl bg-indigo-600 text-white text-xs font-black flex items-center gap-1.5 shadow-md shadow-indigo-600/30 hover:bg-indigo-700 active:scale-95 transition cursor-pointer"
+            >
+              <LogIn className="w-3.5 h-3.5" />
+              <span>Sign In / Sign Up</span>
+            </button>
+          )}
+        </div>
+      </div>
+
       <form onSubmit={handleSaveProfile} className="space-y-6">
         {/* Responsive Grid: 2 columns on lg */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -104,16 +312,20 @@ export const ProfileSettingsScreen: React.FC = () => {
                   />
                 ) : (
                   <div className="w-full h-full bg-gradient-to-br from-indigo-700 to-slate-900 text-white font-black text-xl flex items-center justify-center">
-                    {user.name.charAt(0)}
+                    {user.name.charAt(0) || 'U'}
                   </div>
                 )}
               </div>
               <div>
                 <h2 className="text-lg font-black text-slate-900 dark:text-white">{user.name}</h2>
-                <span className="text-xs font-bold text-slate-700 dark:text-slate-300">{user.email}</span>
+                <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                  {user.email || user.phone || 'No email configured'}
+                </span>
                 <div className="flex items-center gap-1.5 text-xs text-indigo-700 dark:text-indigo-400 font-black mt-1">
                   <CheckCircle2 className="w-4 h-4 text-indigo-600" />
-                  <span>Verified SafeJourney Pro Account</span>
+                  <span>
+                    {user.isLoggedIn ? 'Cloud Synced SafeJourney Profile' : 'Local Sandbox Mode'}
+                  </span>
                 </div>
               </div>
             </div>
@@ -298,6 +510,9 @@ export const ProfileSettingsScreen: React.FC = () => {
               </div>
             </div>
           </div>
+
+          {/* Card: Supabase Cloud Integration Status */}
+          <SupabaseStatusCard />
 
           {/* Card 4: Data Management */}
           <div className="glass-panel rounded-[32px] p-6 lg:p-7 shadow-sm border border-slate-200 dark:border-indigo-900/50 space-y-4">

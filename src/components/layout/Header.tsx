@@ -17,6 +17,8 @@ import {
   Sparkles,
   Radio,
   Clock,
+  LogIn,
+  LogOut,
 } from 'lucide-react';
 import { useSafety } from '../../context/SafetyContext';
 import { soundManager } from '../../utils/audio';
@@ -35,6 +37,8 @@ export const Header: React.FC = () => {
     setTheme,
     deviceView,
     setDeviceView,
+    setShowAuthModal,
+    signOutAction,
   } = useSafety();
 
   const handleQuickSos = () => {
@@ -190,28 +194,42 @@ export const Header: React.FC = () => {
               <span>SOS</span>
             </button>
 
-            {/* User Profile Avatar */}
-            <button
-              onClick={() => setActiveTab('profile')}
-              className="flex items-center gap-2 p-1 rounded-2xl glass-panel hover:bg-slate-100 dark:hover:bg-slate-800 transition shadow-xs group cursor-pointer"
-              title="View Profile & Settings"
-            >
-              <div className="w-8 h-8 rounded-xl overflow-hidden bg-gradient-to-br from-indigo-600 to-slate-900 text-white flex items-center justify-center font-black text-xs shadow-xs border border-indigo-400/30">
-                {user.avatarUrl ? (
-                  <img
-                    src={user.avatarUrl}
-                    alt={user.name}
-                    referrerPolicy="no-referrer"
-                    className="w-full h-full object-cover"
-                  />
-                ) : (
-                  user.name.charAt(0)
-                )}
-              </div>
-              <span className="hidden xl:inline text-xs font-black text-slate-900 dark:text-white pr-2">
-                {user.name.split(' ')[0]}
-              </span>
-            </button>
+            {/* User Profile Avatar / Sign In Button */}
+            {user.isLoggedIn ? (
+              <button
+                onClick={() => setActiveTab('profile')}
+                className="flex items-center gap-2 p-1 rounded-2xl glass-panel hover:bg-slate-100 dark:hover:bg-slate-800 transition shadow-xs group cursor-pointer"
+                title="View Profile & Cloud Settings"
+              >
+                <div className="w-8 h-8 rounded-xl overflow-hidden bg-gradient-to-br from-indigo-600 to-slate-900 text-white flex items-center justify-center font-black text-xs shadow-xs border border-indigo-400/30">
+                  {user.avatarUrl ? (
+                    <img
+                      src={user.avatarUrl}
+                      alt={user.name}
+                      referrerPolicy="no-referrer"
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    user.name.charAt(0) || 'U'
+                  )}
+                </div>
+                <span className="hidden xl:inline text-xs font-black text-slate-900 dark:text-white pr-2">
+                  {user.name.split(' ')[0]}
+                </span>
+              </button>
+            ) : (
+              <button
+                onClick={() => {
+                  soundManager.triggerHaptic(20);
+                  setShowAuthModal(true);
+                }}
+                className="h-9 px-3.5 rounded-2xl bg-indigo-600 text-white text-xs font-black flex items-center gap-1.5 shadow-md shadow-indigo-600/25 hover:bg-indigo-700 active:scale-95 transition cursor-pointer"
+                title="Sign In to Sync Journeys & Evidence"
+              >
+                <LogIn className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Sign In</span>
+              </button>
+            )}
 
           </div>
         </div>
